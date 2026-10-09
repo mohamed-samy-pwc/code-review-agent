@@ -1,0 +1,11 @@
+{
+  "name": "js-ts-no-tests",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "echo 'no build step'"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0"
+  }
+}

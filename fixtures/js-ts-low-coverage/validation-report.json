@@ -1,0 +1,14 @@
+{
+  "validator_version": "1.0.0",
+  "timestamp": "2026-10-08T22:21:05Z",
+  "invocation_dir": "/Users/mmansy004/Documents/ai-projects/code-review/fixtures/js-ts-low-coverage",
+  "overall_pass": false,
+  "projects": [{"project_dir": "root", "language": "typescript", "gates": {"build": {"status": "SKIPPED", "duration_seconds": 0, "exit_code": null, "reason": "no build script and tsc not found", "log_file": null}, "test": {"status": "PASS", "duration_seconds": 8, "exit_code": 0, "reason": null, "log_file": null}, "lint": {"status": "FAIL", "duration_seconds": 3, "exit_code": 2, "reason": "eslint failed (exit 2)", "log_file": "validation-logs/root-typescript-lint.log"}, "coverage": {"status": "PASS", "duration_seconds": 0, "exit_code": null, "reason": null, "log_file": null, "line_coverage_pct": 20, "branch_coverage_pct": null, "function_coverage_pct": null, "threshold_pct": 10}}}],
+  "summary": {
+    "total_projects": 1,
+    "total_gates_run": 4,
+    "passed": 2,
+    "failed": 1,
+    "skipped": 1
+  }
+}

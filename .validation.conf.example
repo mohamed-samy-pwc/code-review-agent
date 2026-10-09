@@ -1,0 +1,47 @@
+# .validation.conf — Universal Validation Script configuration
+#
+# Copy this file to .validation.conf in your project root and edit as needed.
+# All settings are optional; defaults apply when a key is absent.
+# Lines starting with # are comments and are ignored.
+# Both validate.sh and validate.ps1 read this same file.
+#
+# Key=Value format. No quoting needed. Inline # comments are supported.
+
+# ---------------------------------------------------------------------------
+# COVERAGE_THRESHOLD
+# Minimum line coverage percentage required for the coverage gate to PASS.
+# Integer, 0–100. Default: 80
+# ---------------------------------------------------------------------------
+COVERAGE_THRESHOLD=80
+
+# ---------------------------------------------------------------------------
+# COVERAGE_THRESHOLD_<LANG>
+# Per-language override for the coverage threshold.
+# The language slug must match the detection slug used by the validator:
+#   typescript, python, java, kotlin, go, rust, dotnet, ruby, php, swift, cpp, elixir, scala
+#
+# When set, this overrides COVERAGE_THRESHOLD for that language only.
+# Other languages continue to use the global COVERAGE_THRESHOLD.
+#
+# Examples:
+# ---------------------------------------------------------------------------
+# COVERAGE_THRESHOLD_PYTHON=85       # mature backend — hold to 85%
+# COVERAGE_THRESHOLD_TYPESCRIPT=70   # bootstrapping frontend — allow 70%
+# COVERAGE_THRESHOLD_GO=90           # critical service — require 90%
+
+# ---------------------------------------------------------------------------
+# VERBOSE
+# When true, prints full tool output to the terminal in addition to status lines.
+# Equivalent to passing --verbose on the command line.
+# CLI flag takes precedence over this setting.
+# Default: false
+# ---------------------------------------------------------------------------
+VERBOSE=false
+
+# ---------------------------------------------------------------------------
+# FAIL_FAST
+# Reserved for future use. Currently ignored — the script always runs all
+# gates for all projects before exiting, giving the full picture in one run.
+# Default: false
+# ---------------------------------------------------------------------------
+FAIL_FAST=false

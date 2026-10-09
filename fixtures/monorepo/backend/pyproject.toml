@@ -1,0 +1,9 @@
+[project]
+name = "python-passing"
+version = "0.1.0"
+
+[tool.pytest.ini_options]
+addopts = "--cov=src --cov-report=term-missing -q"
+
+[tool.ruff]
+line-length = 88

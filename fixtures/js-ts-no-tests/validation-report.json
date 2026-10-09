@@ -1,0 +1,14 @@
+{
+  "validator_version": "1.0.0",
+  "timestamp": "2026-10-08T22:20:00Z",
+  "invocation_dir": "/Users/mmansy004/Documents/ai-projects/code-review/fixtures/js-ts-no-tests",
+  "overall_pass": false,
+  "projects": [{"project_dir": "root", "language": "typescript", "gates": {"build": {"status": "PASS", "duration_seconds": 1, "exit_code": 0, "reason": null, "log_file": null}, "test": {"status": "FAIL", "duration_seconds": 3, "exit_code": 1, "reason": "No test files detected — a project must have tests to be reviewable", "log_file": "validation-logs/root-typescript-test.log"}, "lint": {"status": "SKIPPED", "duration_seconds": 0, "exit_code": null, "reason": "no ESLint config found", "log_file": null}, "coverage": {"status": "SKIPPED", "duration_seconds": 0, "exit_code": null, "reason": "no coverage data (test gate skipped or failed)", "log_file": null, "line_coverage_pct": null, "branch_coverage_pct": null, "function_coverage_pct": null, "threshold_pct": 80}}}],
+  "summary": {
+    "total_projects": 1,
+    "total_gates_run": 4,
+    "passed": 1,
+    "failed": 1,
+    "skipped": 2
+  }
+}
