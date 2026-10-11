@@ -1,0 +1,14 @@
+#!/usr/bin/env sh
+# Block pushes that contain any commit with a Co-Authored-By trailer.
+zero=0000000000000000000000000000000000000000
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ "$local_sha" = "$zero" ] && continue
+  if [ "$remote_sha" = "$zero" ]; then range="$local_sha"; else range="$remote_sha..$local_sha"; fi
+  bad=$(git log --format='%h %s' -i --grep='^co-authored-by:' "$range" 2>/dev/null)
+  if [ -n "$bad" ]; then
+    echo "pre-push: refusing to push commits with a Co-Authored-By trailer:" >&2
+    echo "$bad" >&2
+    exit 1
+  fi
+done
+exit 0
