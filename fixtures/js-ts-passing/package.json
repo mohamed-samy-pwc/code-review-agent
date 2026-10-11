@@ -2,6 +2,7 @@
   "name": "js-ts-passing",
   "version": "1.0.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "build": "tsc --noEmit",
     "test": "jest"

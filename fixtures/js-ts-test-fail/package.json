@@ -1,7 +1,8 @@
 {
-  "name": "js-ts-passing",
+  "name": "js-ts-test-fail",
   "version": "1.0.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "build": "tsc --noEmit",
     "test": "jest"

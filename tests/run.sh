@@ -5,10 +5,10 @@
 # Usage:   ./tests/run.sh [--verbose]
 #
 # How to add a new test case (3 steps):
-#   1. Call assert_exit_code, assert_json_field, or assert_file_exists
-#      inside a test_case block.
-#   2. Give the block a descriptive name string.
-#   3. Run ./tests/run.sh to see it turn green.
+#   1. exit_code=$(run_validate "$FIXTURES/<fixture>" [flags])
+#   2. assert_exit_code <expected> "$exit_code" "<description>"
+#   3. assert_json_field "$FIXTURES/<fixture>/validation-report.json" '"key"' <value> "<description>"
+#      (or assert_file_exists <path> "<description>"), then run ./tests/run.sh.
 #
 # The harness uses only POSIX sh tools: grep, sed, cut — no jq required.
 # =============================================================================
@@ -62,9 +62,25 @@ assert_exit_code() {
   fi
 }
 
+# _json_value <json_file> <pattern>
+# The report may be single-line JSON, so match with grep -o rather than whole lines.
+#   '"key"'           -> first scalar value of that key
+#   '"key": "value"'  -> "value" if that exact pair appears anywhere, else "(absent)"
+_json_value() {
+  case "$2" in
+    *:*)
+      if grep -qF "$2" "$1"; then
+        printf '%s' "$2" | sed 's/.*: *//;s/"//g'
+      else
+        printf '(absent)'
+      fi ;;
+    *)
+      grep -o "$2 *: *[^,}]*" "$1" | head -1 | sed 's/.*: *//;s/"//g;s/ *$//' ;;
+  esac
+}
+
 # assert_json_field <json_file> <field_grep_pattern> <expected_value> <description>
-# Uses grep to find a line matching field_grep_pattern, then extracts the value
-# after the last colon/quote. Works for simple scalar JSON fields.
+# Extracts the scalar value for field_grep_pattern via _json_value (see above).
 assert_json_field() {
   json_file="$1"; pattern="$2"; expected="$3"; desc="$4"
   if [ ! -f "$json_file" ]; then
@@ -73,8 +89,7 @@ assert_json_field() {
     FAIL_COUNT=$((FAIL_COUNT + 1))
     return
   fi
-  # Extract the value: find pattern line, grab the part after ": " stripping quotes/commas
-  actual=$(grep "$pattern" "$json_file" | head -1 | sed 's/.*: *//;s/[",]//g;s/^ *//;s/ *$//')
+  actual=$(_json_value "$json_file" "$pattern")
   if [ "$actual" = "$expected" ]; then
     _color "$GREEN"; printf '  PASS'; _color "$RESET"
     printf ' %s="%s" — %s\n' "$pattern" "$actual" "$desc"
@@ -96,7 +111,7 @@ assert_json_field_contains() {
     FAIL_COUNT=$((FAIL_COUNT + 1))
     return
   fi
-  actual=$(grep "$pattern" "$json_file" | head -1 | sed 's/.*: *//;s/[",]//g;s/^ *//;s/ *$//')
+  actual=$(grep -o "$pattern *: *\"[^\"]*\"" "$json_file" | sed 's/.*: *//;s/"//g')
   if printf '%s' "$actual" | grep -q "$substring"; then
     _color "$GREEN"; printf '  PASS'; _color "$RESET"
     printf ' %s contains "%s" — %s\n' "$pattern" "$substring" "$desc"
@@ -162,9 +177,9 @@ run_validate() {
   actual_exit=0
   if [ -x "$VALIDATE_SH" ]; then
     # shellcheck disable=SC2086
-    (cd "$fixture_dir" && sh "$VALIDATE_SH" $flags) > /tmp/validate_stdout 2>&1 || actual_exit=$?
+    (cd "$fixture_dir" && sh "$VALIDATE_SH" $flags) > "${TMPDIR:-/tmp}/validate_stdout.$$" 2>&1 || actual_exit=$?
     if $VERBOSE; then
-      cat /tmp/validate_stdout
+      cat "${TMPDIR:-/tmp}/validate_stdout.$$"
     fi
   else
     actual_exit=127  # script not found / not executable
