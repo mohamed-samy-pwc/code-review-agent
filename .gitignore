@@ -1,2 +1,3 @@
 fixtures/**/validation-report.json
 fixtures/**/validation-logs/
+.venv/
