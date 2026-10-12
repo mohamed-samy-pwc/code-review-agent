@@ -44,7 +44,7 @@ STUB
 }
 
 # Canned stdout for the tools whose output the coverage Gate parses.
-_char_canned_output() { # <lang> <stub dir>
+_char_canned_output() { # <lang> <stub dir> <project dir>
   case "$1" in
     typescript) printf 'All files | 90 | 80 | 70 | 85 |\n' > "$2/npm.out" ;;
     python)     printf 'TOTAL    142    12    92%%\n' > "$2/python3.out" ;;
@@ -52,6 +52,7 @@ _char_canned_output() { # <lang> <stub dir>
     rust)       printf 'TOTAL    100    15    85.00%%\n' > "$2/cargo.out" ;;
     php)        printf 'Lines:   91.00%% (10/11)\n' > "$2/phpunit.out" ;;
     elixir)     printf '88.00%% | Total\n' > "$2/mix.out" ;;
+    dotnet)     printf 'Attachments:\n  %s/TestResults/g/coverage.cobertura.xml\n' "$3" > "$2/dotnet.out" ;;
   esac
 }
 
@@ -95,7 +96,9 @@ _char_make_project() { # <lang> <dir> <local yes|no>
       if [ "$_loc" = yes ]; then _char_make_stub "$_d/gradlew"; fi ;;
     go)     : > "$_d/go.mod"; : > "$_d/a_test.go" ;;
     rust)   : > "$_d/Cargo.toml"; mkdir -p "$_d/src"; printf '#[cfg(test)]\n' > "$_d/src/lib.rs" ;;
-    dotnet) : > "$_d/app.csproj"; : > "$_d/ATests.cs" ;;
+    dotnet)
+      : > "$_d/app.csproj"; : > "$_d/ATests.cs"; mkdir -p "$_d/TestResults/g"
+      printf '<coverage line-rate="0.88" lines-covered="88" lines-valid="100" version="1.9">\n' > "$_d/TestResults/g/coverage.cobertura.xml" ;;
     ruby)   : > "$_d/Gemfile"; : > "$_d/a_spec.rb"; printf 'task :build\n' > "$_d/Rakefile" ;;
     php)
       printf '{}\n' > "$_d/composer.json"; : > "$_d/ATest.php"
@@ -131,7 +134,7 @@ _char_observe() { # <lang> <scenario> <script command...>
     missing) _char_make_project "$_l" "$_fix" no ;;
     *)       _char_make_project "$_l" "$_fix" yes
              for _t in $(_char_path_tools "$_l"); do _char_make_stub "$_stubs/$_t"; done
-             _char_canned_output "$_l" "$_sdir"
+             _char_canned_output "$_l" "$_sdir" "$_fix"
              if [ "$_s" = fail ]; then
                for _t in $(_char_path_tools "$_l") mvnw gradlew eslint phpunit phpstan; do printf '1\n' > "$_sdir/$_t.exit"; done
              fi ;;

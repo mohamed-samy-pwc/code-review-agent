@@ -440,6 +440,69 @@ fi
 printf '\n'
 
 # ==========================================================================
+# GROUP 14: regressions found by running real projects
+# ==========================================================================
+printf '── Group 14: symlinked subdirectory and invalid config key ─\n'
+
+# A symlinked subdirectory is not a Project: only the real directory counts.
+LINK_ROOT="$(mktemp -d)"
+mkdir -p "$LINK_ROOT/real-go"; : > "$LINK_ROOT/real-go/go.mod"
+ln -s real-go "$LINK_ROOT/link-go"
+(cd "$LINK_ROOT" && NO_COLOR=1 sh "$VALIDATE_SH") > /dev/null 2>&1 || true
+assert_json_field "$LINK_ROOT/validation-report.json" '"total_projects"' 1 "validate.sh does not follow a symlinked subdirectory"
+if command -v pwsh >/dev/null 2>&1; then
+  rm -f "$LINK_ROOT/validation-report.json"
+  (cd "$LINK_ROOT" && NO_COLOR=1 pwsh -NoProfile -File "$REPO_ROOT/validate.ps1") > /dev/null 2>&1 || true
+  assert_json_field "$LINK_ROOT/validation-report.json" '"total_projects"' 1 "validate.ps1 does not follow a symlinked subdirectory"
+fi
+rm -rf "$LINK_ROOT"
+
+# A solution file owns its project subdirectories: one Project, not one per csproj.
+SLN_ROOT="$(mktemp -d)"; mkdir -p "$SLN_ROOT/src/App" "$SLN_ROOT/tests/App.Tests"
+: > "$SLN_ROOT/App.slnx"; : > "$SLN_ROOT/src/App/App.csproj"; : > "$SLN_ROOT/tests/App.Tests/App.Tests.csproj"
+(cd "$SLN_ROOT" && NO_COLOR=1 sh "$VALIDATE_SH") > /dev/null 2>&1 || true
+assert_json_field "$SLN_ROOT/validation-report.json" '"total_projects"' 1 "validate.sh: a .slnx root owns its csproj subdirectories"
+if command -v pwsh >/dev/null 2>&1; then
+  rm -f "$SLN_ROOT/validation-report.json"
+  (cd "$SLN_ROOT" && NO_COLOR=1 pwsh -NoProfile -File "$REPO_ROOT/validate.ps1") > /dev/null 2>&1 || true
+  assert_json_field "$SLN_ROOT/validation-report.json" '"total_projects"' 1 "validate.ps1: a .slnx root owns its csproj subdirectories"
+fi
+rm -rf "$SLN_ROOT"
+
+# A C# test project is recognised by its [Fact]/[Test] attributes, not only by file name.
+CS_ROOT="$(mktemp -d)"; : > "$CS_ROOT/App.csproj"
+printf 'public class MathFacts { [Fact] public void A() {} }\n' > "$CS_ROOT/MathFacts.cs"
+(cd "$CS_ROOT" && NO_COLOR=1 sh "$VALIDATE_SH") > /dev/null 2>&1 || true
+if grep -q 'No test files' "$CS_ROOT/validation-report.json"; then
+  _color "$RED"; printf '  FAIL'; _color "$RESET"; printf ' validate.sh: [Fact] file is not recognised as a test\n'; FAIL_COUNT=$((FAIL_COUNT + 1))
+else
+  _color "$GREEN"; printf '  PASS'; _color "$RESET"; printf ' validate.sh: a C# file with [Fact] counts as a test\n'; PASS_COUNT=$((PASS_COUNT + 1))
+fi
+if command -v pwsh >/dev/null 2>&1; then
+  rm -f "$CS_ROOT/validation-report.json"
+  (cd "$CS_ROOT" && NO_COLOR=1 pwsh -NoProfile -File "$REPO_ROOT/validate.ps1") > /dev/null 2>&1 || true
+  if grep -q 'No test files' "$CS_ROOT/validation-report.json"; then
+    _color "$RED"; printf '  FAIL'; _color "$RESET"; printf ' validate.ps1: [Fact] file is not recognised as a test\n'; FAIL_COUNT=$((FAIL_COUNT + 1))
+  else
+    _color "$GREEN"; printf '  PASS'; _color "$RESET"; printf ' validate.ps1: a C# file with [Fact] counts as a test\n'; PASS_COUNT=$((PASS_COUNT + 1))
+  fi
+fi
+rm -rf "$CS_ROOT"
+
+# A Language key with characters outside A-Z a-z 0-9 _ is a script error in both scripts.
+KEY_ROOT="$(mktemp -d)"; : > "$KEY_ROOT/go.mod"
+printf 'COVERAGE_THRESHOLD_TYPE-SCRIPT=50\n' > "$KEY_ROOT/.validation.conf"
+exit_code=0; (cd "$KEY_ROOT" && sh "$VALIDATE_SH") > /dev/null 2>&1 || exit_code=$?
+assert_exit_code "2" "$exit_code" "validate.sh: invalid Language key in .validation.conf exits 2"
+if command -v pwsh >/dev/null 2>&1; then
+  exit_code=0; (cd "$KEY_ROOT" && pwsh -NoProfile -File "$REPO_ROOT/validate.ps1") > /dev/null 2>&1 || exit_code=$?
+  assert_exit_code "2" "$exit_code" "validate.ps1: invalid Language key in .validation.conf exits 2"
+fi
+rm -rf "$KEY_ROOT"
+
+printf '\n'
+
+# ==========================================================================
 # GROUP 13: fake-toolchain characterization of all 13 Languages (validate.sh)
 # ==========================================================================
 . "$REPO_ROOT/tests/characterization.sh"

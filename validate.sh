@@ -133,6 +133,7 @@ _try_recipe() { "_recipe_$1" detect "$_d" && printf '%s' "$1"; }
 _recipe_typescript() {
   _req="$1"; _d="$2"
   case "$_req" in
+    workspace_root) return 1 ;;
     detect) [ -f "$_d/package.json" ] ;;
     has_tests)
       find "$_d" -not -path '*/node_modules/*' \
@@ -198,6 +199,7 @@ _recipe_python() {
   _req="$1"; _d="$2"
   _py=$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)
   case "$_req" in
+    workspace_root) return 1 ;;
     detect)
       [ -f "$_d/pyproject.toml" ] || [ -f "$_d/setup.py" ] || \
         [ -f "$_d/setup.cfg" ] || [ -f "$_d/requirements.txt" ] ;;
@@ -244,6 +246,7 @@ _recipe_python() {
 _recipe_go() {
   _req="$1"; _d="$2"
   case "$_req" in
+    workspace_root) [ -f "$_d/go.work" ] ;;
     # go.mod is canonical — *.go files may appear in vendor/ of non-Go projects
     detect)    [ -f "$_d/go.mod" ] ;;
     has_tests) find "$_d" -name '*_test.go' 2>/dev/null | grep -q . ;;
@@ -282,6 +285,7 @@ _recipe_go() {
 _recipe_rust() {
   _req="$1"; _d="$2"
   case "$_req" in
+    workspace_root) grep -q '^\[workspace\]' "$_d/Cargo.toml" 2>/dev/null ;;
     detect)    [ -f "$_d/Cargo.toml" ] ;;
     has_tests) grep -r '#\[cfg(test)\]' "$_d/src" >/dev/null 2>&1 || [ -d "$_d/tests" ] ;;
     build)
@@ -314,6 +318,7 @@ _recipe_rust() {
 _recipe_swift() {
   _req="$1"; _d="$2"
   case "$_req" in
+    workspace_root) return 1 ;;
     detect)
       [ -f "$_d/Package.swift" ] || ls -d "$_d"/*.xcodeproj >/dev/null 2>&1 ;;
     has_tests) find "$_d" -name '*Tests.swift' 2>/dev/null | grep -q . ;;
@@ -342,6 +347,7 @@ _recipe_swift() {
 _recipe_cpp() {
   _req="$1"; _d="$2"
   case "$_req" in
+    workspace_root) return 1 ;;
     detect)
       [ -f "$_d/CMakeLists.txt" ] || \
         { [ -f "$_d/Makefile" ] && \
@@ -400,6 +406,7 @@ _jacoco_line_pct() {
 _recipe_java() {
   _req="$1"; _d="$2"
   case "$_req" in
+    workspace_root) grep -q '<modules>' "$_d/pom.xml" 2>/dev/null || grep -qs '^[[:space:]]*include' "$_d/settings.gradle" "$_d/settings.gradle.kts" ;;
     detect)
       { [ -f "$_d/pom.xml" ] || [ -f "$_d/build.gradle" ]; } ;;
     has_tests) [ -d "$_d/src/test" ] ;;
@@ -429,6 +436,7 @@ _recipe_java() {
 _recipe_kotlin() {
   _req="$1"; _d="$2"
   case "$_req" in
+    workspace_root) grep -qs '^[[:space:]]*include' "$_d/settings.gradle" "$_d/settings.gradle.kts" ;;
     detect)
       [ -f "$_d/build.gradle.kts" ] || \
         { [ -f "$_d/build.gradle" ] && ls "$_d"/*.kt >/dev/null 2>&1; } ;;
@@ -461,6 +469,7 @@ _jvm_test() {
 _recipe_scala() {
   _req="$1"; _d="$2"
   case "$_req" in
+    workspace_root) return 1 ;;
     detect)    [ -f "$_d/build.sbt" ] ;;
     has_tests) [ -d "$_d/src/test" ] ;;
     build)
@@ -490,10 +499,15 @@ _recipe_scala() {
 _recipe_dotnet() {
   _req="$1"; _d="$2"
   case "$_req" in
+    workspace_root) ls "$_d"/*.sln >/dev/null 2>&1 || ls "$_d"/*.slnx >/dev/null 2>&1 ;;
     detect)
       ls "$_d"/*.csproj >/dev/null 2>&1 || ls "$_d"/*.sln >/dev/null 2>&1 || \
-        [ -f "$_d/global.json" ] ;;
-    has_tests) find "$_d" \( -name '*Tests.cs' -o -name '*Test.cs' \) 2>/dev/null | grep -q . ;;
+        ls "$_d"/*.slnx >/dev/null 2>&1 || [ -f "$_d/global.json" ] ;;
+    has_tests)
+      # By file name, or by a test attribute (xUnit [Fact]/[Theory], NUnit [Test], MSTest [TestMethod]).
+      find "$_d" \( -name '*Tests.cs' -o -name '*Test.cs' \) 2>/dev/null | grep -q . || \
+        grep -rlE '\[(Fact|Theory|Test|TestCase|TestMethod|DataTestMethod)\b' --include='*.cs' \
+          --exclude-dir=obj --exclude-dir=bin --exclude-dir=node_modules "$_d" 2>/dev/null | grep -q . ;;
     build)
       if command -v dotnet >/dev/null 2>&1; then
         gate_exec "$_d" dotnet restore
@@ -514,13 +528,23 @@ _recipe_dotnet() {
       else
         gate_skip "toolchain not installed (dotnet not found)"
       fi ;;
-    coverage) return 1 ;;
+    coverage)
+      # Cobertura files written by coverlet; the test output lists their paths.
+      # Sum covered and valid lines over all of them.
+      grep -o '[^ ]*coverage\.cobertura\.xml' "$GATE_COVFILE" 2>/dev/null | sort -u | while read -r _x; do
+        [ -f "$_x" ] || continue
+        _root=$(grep -m1 '<coverage ' "$_x")
+        printf '%s %s\n' "$(printf '%s' "$_root" | sed -n 's/.* lines-covered="\([0-9]*\)".*/\1/p')" \
+                          "$(printf '%s' "$_root" | sed -n 's/.* lines-valid="\([0-9]*\)".*/\1/p')"
+      done | awk '$2 ~ /^[0-9]+$/ {c+=$1; v+=$2} END {if (v>0) printf "%.1f", c/v*100}'
+      return 0 ;;
   esac
 }
 
 _recipe_ruby() {
   _req="$1"; _d="$2"
   case "$_req" in
+    workspace_root) return 1 ;;
     detect)    [ -f "$_d/Gemfile" ] ;;
     has_tests) find "$_d" \( -name '*_spec.rb' -o -name '*_test.rb' \) 2>/dev/null | grep -q . ;;
     build)
@@ -551,6 +575,7 @@ _recipe_ruby() {
 _recipe_php() {
   _req="$1"; _d="$2"
   case "$_req" in
+    workspace_root) return 1 ;;
     detect)    [ -f "$_d/composer.json" ] ;;
     has_tests) find "$_d" -name '*Test.php' 2>/dev/null | grep -q . ;;
     build)
@@ -581,6 +606,7 @@ _recipe_php() {
 _recipe_elixir() {
   _req="$1"; _d="$2"
   case "$_req" in
+    workspace_root) return 1 ;;
     detect)    [ -f "$_d/mix.exs" ] ;;
     has_tests) find "$_d" -name '*_test.exs' 2>/dev/null | grep -q . ;;
     build)
@@ -756,10 +782,20 @@ _detect_lang() {
 _l=$(_detect_lang "$INVOCATION_DIR")
 [ -n "$_l" ] && printf 'root|%s\n' "$_l" >> "$WORK/projects"
 
+# A workspace root (solution file, Maven modules, Cargo workspace, go.work, Gradle
+# include) builds its own subprojects, so same-family subdirectories are not Projects.
+_root_owns=false
+[ -n "$_l" ] && "_recipe_$_l" workspace_root "$INVOCATION_DIR" && _root_owns=true
+_same_family() { # <root lang> <sub lang>
+  case "$1/$2" in java/kotlin|kotlin/java) return 0 ;; esac
+  [ "$1" = "$2" ]
+}
+
 for _sub in "$INVOCATION_DIR"/*/; do
   [ -d "$_sub" ] || continue
-  [ -L "$_sub" ] && continue          # do not follow symlinks
+  [ -L "${_sub%/}" ] && continue      # do not follow symlinks (a trailing slash would resolve the link)
   _sl=$(_detect_lang "$_sub")
+  [ "$_root_owns" = "true" ] && _same_family "$_l" "$_sl" && continue
   [ -n "$_sl" ] && printf '%s|%s\n' "$(basename "$_sub")" "$_sl" >> "$WORK/projects"
 done
 

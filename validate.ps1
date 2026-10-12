@@ -72,7 +72,15 @@ function Read-Conf {
             switch -Regex ($k) {
                 '^COVERAGE_THRESHOLD$'      { $script:CoverageThreshold = ConvertTo-Threshold $k $v }
                 '^VERBOSE$'                 { if ($v -eq 'true') { $script:VerboseMode = $true } }
-                '^COVERAGE_THRESHOLD_(.+)$' { $lang = $Matches[1].ToLower(); $script:LangThresholds[$lang] = ConvertTo-Threshold $k $v }
+                '^COVERAGE_THRESHOLD_(.+)$' {
+                    $suffix = $Matches[1]
+                    $threshold = ConvertTo-Threshold $k $v
+                    if ($suffix -notmatch '^[A-Za-z0-9_]+$') {
+                        [Console]::Error.WriteLine("Invalid config key: $k")
+                        exit 2
+                    }
+                    $script:LangThresholds[$suffix.ToLower()] = $threshold
+                }
             }
         }
     }
@@ -342,6 +350,14 @@ function Recipe-python { param([string]$Req, [string]$Dir)
     }
 }
 
+# True when a Gradle settings file includes subprojects.
+function Test-GradleIncludes { param([string]$Dir)
+    foreach ($f in 'settings.gradle','settings.gradle.kts') {
+        if ((Test-Path "$Dir/$f") -and ((Get-Content "$Dir/$f" -Raw) -match '(?m)^\s*include')) { return $true }
+    }
+    return $false
+}
+
 # Line coverage from a JaCoCo XML report (Java, Kotlin); nothing when absent.
 function Get-JacocoLinePct { param([string]$Dir)
     $xml = "$Dir/target/site/jacoco/jacoco.xml"
@@ -367,6 +383,7 @@ function Invoke-JvmTest { param([string]$Dir)
 
 function Recipe-java { param([string]$Req, [string]$Dir)
     switch ($Req) {
+        'workspace_root' { return (((Test-Path "$Dir/pom.xml") -and ((Get-Content "$Dir/pom.xml" -Raw) -match '<modules>')) -or (Test-GradleIncludes $Dir)) }
         'detect'    { return ((Test-Path "$Dir/pom.xml") -or (Test-Path "$Dir/build.gradle")) }
         'has_tests' { return (Test-Path "$Dir/src/test") }
         'build' {
@@ -387,6 +404,7 @@ function Recipe-java { param([string]$Req, [string]$Dir)
 
 function Recipe-kotlin { param([string]$Req, [string]$Dir)
     switch ($Req) {
+        'workspace_root' { return (Test-GradleIncludes $Dir) }
         'detect' {
             if (Test-Path "$Dir/build.gradle.kts") { return $true }
             return ((Test-Path "$Dir/build.gradle") -and [bool](Get-ChildItem -Path $Dir -Filter '*.kt' -ErrorAction SilentlyContinue))
@@ -408,6 +426,7 @@ function Recipe-kotlin { param([string]$Req, [string]$Dir)
 function Recipe-go { param([string]$Req, [string]$Dir)
     switch ($Req) {
         # go.mod is canonical — *.go files may appear in vendor/ of non-Go projects
+        'workspace_root' { return (Test-Path "$Dir/go.work") }
         'detect'    { return (Test-Path "$Dir/go.mod") }
         'has_tests' { return $null -ne (Get-ChildItem -Path $Dir -Recurse -Filter '*_test.go' -ErrorAction SilentlyContinue | Select-Object -First 1) }
         'build' {
@@ -436,6 +455,7 @@ function Recipe-go { param([string]$Req, [string]$Dir)
 
 function Recipe-rust { param([string]$Req, [string]$Dir)
     switch ($Req) {
+        'workspace_root' { return ((Test-Path "$Dir/Cargo.toml") -and ((Get-Content "$Dir/Cargo.toml" -Raw) -match '(?m)^\[workspace\]')) }
         'detect' { return (Test-Path "$Dir/Cargo.toml") }
         'has_tests' {
             if (Test-Path "$Dir/tests") { return $true }
@@ -463,12 +483,21 @@ function Recipe-rust { param([string]$Req, [string]$Dir)
 
 function Recipe-dotnet { param([string]$Req, [string]$Dir)
     switch ($Req) {
+        'workspace_root' { return ([bool](Get-ChildItem -Path $Dir -Filter '*.sln' -ErrorAction SilentlyContinue) -or [bool](Get-ChildItem -Path $Dir -Filter '*.slnx' -ErrorAction SilentlyContinue)) }
         'detect' {
             return ([bool](Get-ChildItem -Path $Dir -Filter '*.csproj' -ErrorAction SilentlyContinue) -or
                     [bool](Get-ChildItem -Path $Dir -Filter '*.sln' -ErrorAction SilentlyContinue) -or
+                    [bool](Get-ChildItem -Path $Dir -Filter '*.slnx' -ErrorAction SilentlyContinue) -or
                     (Test-Path "$Dir/global.json"))
         }
-        'has_tests' { return $null -ne (Get-ChildItem -Path $Dir -Recurse -Include '*Tests.cs','*Test.cs' -ErrorAction SilentlyContinue | Select-Object -First 1) }
+        'has_tests' {
+            # By file name, or by a test attribute (xUnit [Fact]/[Theory], NUnit [Test], MSTest [TestMethod]).
+            if ($null -ne (Get-ChildItem -Path $Dir -Recurse -Include '*Tests.cs','*Test.cs' -ErrorAction SilentlyContinue | Select-Object -First 1)) { return $true }
+            return $null -ne (Get-ChildItem -Path $Dir -Recurse -Filter '*.cs' -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -notmatch '[\\/](obj|bin|node_modules)[\\/]' } |
+                Select-String -Pattern '\[(Fact|Theory|Test|TestCase|TestMethod|DataTestMethod)\b' -List -ErrorAction SilentlyContinue |
+                Select-Object -First 1)
+        }
         'build' {
             if (Find-Cmd 'dotnet') {
                 Invoke-GateSeq $Dir 'and' @((New-GateStep 'dotnet' @('restore')), (New-GateStep 'dotnet' @('build')))
@@ -483,7 +512,20 @@ function Recipe-dotnet { param([string]$Req, [string]$Dir)
             if (Find-Cmd 'dotnet') { Invoke-GateRun 'dotnet format failed' $Dir 'dotnet' @('format','--verify-no-changes') }
             else { Set-GateSkip 'toolchain not installed (dotnet not found)' }
         }
-        'coverage' { Set-GateCoverageUnsupported }
+        'coverage' {
+            # Cobertura files written by coverlet; the test output lists their paths.
+            # Sum covered and valid lines over all of them.
+            $covered = 0; $valid = 0
+            foreach ($m in [regex]::Matches([string]$script:Gate.CovContent, '\S*coverage\.cobertura\.xml')) {
+                if (-not (Test-Path -LiteralPath $m.Value)) { continue }
+                $root = Select-String -LiteralPath $m.Value -Pattern '<coverage ' -List | Select-Object -First 1
+                if ($root -and $root.Line -match 'lines-covered="(\d+)"') {
+                    $c = [int]$Matches[1]
+                    if ($root.Line -match 'lines-valid="(\d+)"') { $covered += $c; $valid += [int]$Matches[1] }
+                }
+            }
+            if ($valid -gt 0) { return [Math]::Round($covered / $valid * 100, 1, [MidpointRounding]::AwayFromZero) }
+        }
     }
 }
 
@@ -657,8 +699,18 @@ $Projects = [System.Collections.Generic.List[hashtable]]::new()
 $rootLang = Get-Lang $InvocationDir
 if ($rootLang) { $Projects.Add(@{ Dir = 'root'; AbsDir = $InvocationDir; Lang = $rootLang }) }
 
+# A workspace root (solution file, Maven modules, Cargo workspace, go.work, Gradle
+# include) builds its own subprojects, so same-family subdirectories are not Projects.
+$rootOwns = $false
+if ($rootLang) { $rootOwns = [bool](& "Recipe-$rootLang" 'workspace_root' $InvocationDir) }
+function Test-SameFamily { param([string]$A, [string]$B)
+    if ($A -in 'java','kotlin' -and $B -in 'java','kotlin') { return $true }
+    return $A -eq $B
+}
+
 Get-ChildItem -Path $InvocationDir -Directory | Where-Object { -not $_.Attributes.HasFlag([IO.FileAttributes]::ReparsePoint) } | ForEach-Object {
     $subLang = Get-Lang $_.FullName
+    if ($rootOwns -and $subLang -and (Test-SameFamily $rootLang $subLang)) { return }
     if ($subLang) { $Projects.Add(@{ Dir = $_.Name; AbsDir = $_.FullName; Lang = $subLang }) }
 }
 
