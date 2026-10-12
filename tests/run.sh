@@ -20,6 +20,9 @@ VALIDATE_SH="$REPO_ROOT/validate.sh"
 FIXTURES="$REPO_ROOT/fixtures"
 VERBOSE=false
 
+# Use the repo-local Python venv (pytest, pytest-cov, ruff) when one exists.
+if [ -d "$REPO_ROOT/.venv/bin" ]; then PATH="$REPO_ROOT/.venv/bin:$PATH"; export PATH; fi
+
 if [ "$1" = "--verbose" ]; then
   VERBOSE=true
 fi
