@@ -617,8 +617,8 @@ _recipe_elixir() {
 # ---------------------------------------------------------------------------
 
 # Outcome helpers a recipe calls.
-gate_pass() { GATE_ST=PASS; GATE_RS=""; GATE_EX=0; }
-gate_skip() { GATE_ST=SKIPPED; GATE_RS="$1"; GATE_EX=null; }
+gate_pass() { GATE_STATUS=PASS; GATE_REASON=""; GATE_EXIT_CODE=0; }
+gate_skip() { GATE_STATUS=SKIPPED; GATE_REASON="$1"; GATE_EXIT_CODE=null; }
 
 # Run one command in <dir> (dry-run prints it instead). Leaves its exit code in
 # $GATE_EXIT and its output in $WORK/out. gate_exec_more appends to that output,
@@ -646,42 +646,87 @@ gate_output_matches() { grep -qE "$1" "$WORK/out" 2>/dev/null; }
 # reason ({exit} is replaced by the exit code) and a Sidecar Log.
 gate_finish() {
   if [ "$GATE_EXIT" = "0" ]; then gate_pass; return; fi
-  _gr="$1"
-  case "$_gr" in *'{exit}'*) _gr="${_gr%%'{exit}'*}${GATE_EXIT}${_gr#*'{exit}'}" ;; esac
-  GATE_ST=FAIL; GATE_RS="$_gr"; GATE_EX=$GATE_EXIT
-  GATE_LOG=$(_save_sidecar "$_pd" "$_lang" "$_gate")
+  _failreason="$1"
+  case "$_failreason" in *'{exit}'*) _failreason="${_failreason%%'{exit}'*}${GATE_EXIT}${_failreason#*'{exit}'}" ;; esac
+  GATE_STATUS=FAIL; GATE_REASON="$_failreason"; GATE_EXIT_CODE=$GATE_EXIT
+  GATE_LOG=$(_save_sidecar "$GATE_PROJECT" "$GATE_LANG" "$GATE_NAME")
 }
 
-gate_run() { _grr="$1"; shift; gate_exec "$@"; gate_finish "$_grr"; }
+gate_run() { _failreason_run="$1"; shift; gate_exec "$@"; gate_finish "$_failreason_run"; }
+
+# Test Gate precondition (Hard Gate, ADR-0001): no test files is a FAIL.
+_gate_no_tests() {
+  GATE_STATUS=FAIL; GATE_EXIT_CODE=1
+  GATE_REASON="No test files detected — a project must have tests to be reviewable"
+  printf '%s\n' "$GATE_REASON" > "$WORK/out"
+  GATE_LOG=$(_save_sidecar "$GATE_PROJECT" "$GATE_LANG" "$GATE_NAME")
+  GATE_DETAIL="$GATE_REASON"
+}
+
+# Coverage Gate: parse the output captured by the test Gate (no re-run) and
+# compare line coverage with the Language's threshold.
+_gate_coverage() {
+  GATE_THRESHOLD=$(_get_threshold "$GATE_LANG")
+  GATE_EXIT_CODE=null
+  if [ "$DRY_RUN" = "true" ]; then
+    printf '[DRY RUN] coverage parse (no re-run)\n'
+    gate_skip "dry-run mode"; GATE_DETAIL="$GATE_REASON"; return
+  fi
+  GATE_COVFILE="$WORK/COV_${_project_index}"
+  if [ ! -f "$GATE_COVFILE" ]; then
+    gate_skip "no coverage data (test gate skipped or failed)"; GATE_DETAIL="$GATE_REASON"; return
+  fi
+  # A recipe with no coverage reader returns non-zero.
+  if ! GATE_LPCT=$("_recipe_$GATE_LANG" coverage "$_abs"); then
+    GATE_LPCT=''
+    gate_skip "coverage parsing not implemented for $GATE_LANG"; GATE_DETAIL="$GATE_REASON"; return
+  fi
+  if [ -z "$GATE_LPCT" ]; then
+    gate_skip "coverage output unparseable"
+    cp "$GATE_COVFILE" "$LOG_DIR/${GATE_PROJECT}-${GATE_LANG}-coverage-raw.log" 2>/dev/null || true
+    GATE_LOG="validation-logs/${GATE_PROJECT}-${GATE_LANG}-coverage-raw.log"
+  elif [ "$(awk "BEGIN{print ($GATE_LPCT+0 >= $GATE_THRESHOLD+0) ? \"yes\" : \"no\"}")" = "yes" ]; then
+    GATE_STATUS=PASS; GATE_REASON=""
+  else
+    GATE_STATUS=FAIL; GATE_REASON="${GATE_LPCT}% < ${GATE_THRESHOLD}% threshold"
+    printf '%s\n' "$GATE_REASON" > "$WORK/out"
+    GATE_LOG=$(_save_sidecar "$GATE_PROJECT" "$GATE_LANG" "$GATE_NAME")
+  fi
+}
 
 _run_gate() {
-  _gate="$1"; _pd="$2"; _abs="$3"; _lang="$4"
-  GATE_ST=SKIPPED; GATE_RS=""; GATE_EX=null; GATE_LOG=null; GATE_RAN=false; GATE_COV=true
-  [ "$_gate" = "build" ] && GATE_RS="no build command applies"
+  _gate="$1"; _project="$2"; _abs="$3"; _lang="$4"
+  GATE_NAME="$_gate"; GATE_PROJECT="$_project"; GATE_LANG="$_lang"
+  GATE_STATUS=SKIPPED; GATE_REASON=""; GATE_EXIT_CODE=null; GATE_LOG=null
+  GATE_RAN=false; GATE_COV=true; GATE_DETAIL=''; GATE_LPCT=''; GATE_THRESHOLD=''
+  [ "$_gate" = "build" ] && GATE_REASON="no build command applies"
   _t0=$(date +%s)
-  _status_line "$_pd" "$_lang" "$_gate" "RUNNING"
+  _status_line "$_project" "$_lang" "$_gate" "RUNNING"
 
-  if [ "$_gate" = "test" ] && ! "_recipe_$_lang" has_tests "$_abs"; then
-    GATE_ST=FAIL; GATE_EX=1
-    GATE_RS="No test files detected — a project must have tests to be reviewable"
-    printf '%s\n' "$GATE_RS" > "$WORK/out"
-    GATE_LOG=$(_save_sidecar "$_pd" "$_lang" "$_gate")
-    _t1=$(date +%s); _dur=$((_t1 - _t0))
-    _status_line "$_pd" "$_lang" "$_gate" "$GATE_ST" "$GATE_RS"
-    _write_state "$_gate" "$GATE_ST" "$GATE_RS" "$GATE_EX" "$_dur" "$GATE_LOG"
-    return
-  fi
-
-  "_recipe_$_lang" "$_gate" "$_abs"
-
-  # Coverage is parsed later from the test Gate's captured output.
-  if [ "$_gate" = "test" ] && [ "$GATE_RAN" = "true" ] && [ "$GATE_COV" = "true" ] && [ "$DRY_RUN" != "true" ]; then
-    cp "$WORK/out" "$WORK/COV_${_pi}" 2>/dev/null || true
+  if [ "$_gate" = "coverage" ]; then
+    _gate_coverage
+  elif [ "$_gate" = "test" ] && ! "_recipe_$_lang" has_tests "$_abs"; then
+    _gate_no_tests
+  else
+    "_recipe_$_lang" "$_gate" "$_abs"
+    # Coverage is parsed later from the test Gate's captured output.
+    if [ "$_gate" = "test" ] && [ "$GATE_RAN" = "true" ] && [ "$GATE_COV" = "true" ] && [ "$DRY_RUN" != "true" ]; then
+      cp "$WORK/out" "$WORK/COV_${_project_index}" 2>/dev/null || true
+    fi
   fi
 
   _t1=$(date +%s); _dur=$((_t1 - _t0))
-  _status_line "$_pd" "$_lang" "$_gate" "$GATE_ST" "(${_dur}s)"
-  _write_state "$_gate" "$GATE_ST" "$GATE_RS" "$GATE_EX" "$_dur" "$GATE_LOG"
+  if [ -n "$GATE_DETAIL" ]; then _detail="$GATE_DETAIL"
+  elif [ -n "$GATE_LPCT" ]; then _detail="(${GATE_LPCT}% vs ${GATE_THRESHOLD}%, ${_dur}s)"
+  else _detail="(${_dur}s)"; fi
+  _status_line "$_project" "$_lang" "$_gate" "$GATE_STATUS" "$_detail"
+  _write_state "$_gate" "$GATE_STATUS" "$GATE_REASON" "$GATE_EXIT_CODE" "$_dur" "$GATE_LOG"
+  if [ "$_gate" = "coverage" ]; then
+    _gr_set "$_project_index" coverage lpct "${GATE_LPCT:-null}"
+    _gr_set "$_project_index" coverage bpct null
+    _gr_set "$_project_index" coverage fpct null
+    _gr_set "$_project_index" coverage thr "$GATE_THRESHOLD"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -725,7 +770,7 @@ if [ ! -s "$WORK/projects" ]; then
 fi
 
 printf 'Detected project(s):\n'
-while IFS='|' read -r _pd _pl; do printf '  %s [%s]\n' "$_pd" "$_pl"; done < "$WORK/projects"
+while IFS='|' read -r _project _pl; do printf '  %s [%s]\n' "$_project" "$_pl"; done < "$WORK/projects"
 printf '\n'
 
 # ---------------------------------------------------------------------------
@@ -734,7 +779,7 @@ printf '\n'
 # Stored as shell variables GR_<index>_<gate>_<field>; names never contain
 # directory names. The only evals in the script are in
 # _gr_set and _gr_get.
-#   fields: status reason exit dur log   (+ lpct thr on the coverage gate)
+#   fields: status reason exit dur log   (+ lpct bpct fpct thr on the coverage gate)
 # ---------------------------------------------------------------------------
 
 # Single-quote a value so eval assigns it verbatim.
@@ -743,27 +788,27 @@ _q() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 _gr_set() { eval "GR_${1}_${2}_${3}=$(_q "$4")"; }
 _gr_get() { eval "printf '%s' \"\${GR_${1}_${2}_${3}:-}\""; }
 
-# Record a Gate Result for the current Project ($_pi).
+# Record a Gate Result for the current Project ($_project_index).
 _write_state() {
   _gate="$1"; _status="$2"; _reason="$3"; _exit="$4"; _dur="$5"; _log="${6:-null}"
-  _gr_set "$_pi" "$_gate" status "$_status"
-  _gr_set "$_pi" "$_gate" reason "$_reason"
-  _gr_set "$_pi" "$_gate" exit "${_exit:-null}"
-  _gr_set "$_pi" "$_gate" dur "$_dur"
-  _gr_set "$_pi" "$_gate" log "$_log"
+  _gr_set "$_project_index" "$_gate" status "$_status"
+  _gr_set "$_project_index" "$_gate" reason "$_reason"
+  _gr_set "$_project_index" "$_gate" exit "${_exit:-null}"
+  _gr_set "$_project_index" "$_gate" dur "$_dur"
+  _gr_set "$_project_index" "$_gate" log "$_log"
 }
 
 _sidecar_path() { printf 'validation-logs/%s-%s-%s.log' "$1" "$2" "$3"; }
 
 _save_sidecar() {
-  _pd="$1"; _lang="$2"; _gate="$3"
-  _logrel=$(_sidecar_path "$_pd" "$_lang" "$_gate")
+  _project="$1"; _lang="$2"; _gate="$3"
+  _logrel=$(_sidecar_path "$_project" "$_lang" "$_gate")
   cp "$WORK/out" "$INVOCATION_DIR/$_logrel" 2>/dev/null || true
   printf '%s' "$_logrel"
 }
 
 _status_line() {
-  _pd="$1"; _lang="$2"; _gate="$3"; _st="$4"; _detail="${5:-}"
+  _project="$1"; _lang="$2"; _gate="$3"; _st="$4"; _detail="${5:-}"
   case "$_st" in
     PASS)    _c="$C_GREEN" ;;
     FAIL)    _c="$C_RED"   ;;
@@ -771,133 +816,71 @@ _status_line() {
     RUNNING) _c="$C_CYAN"  ;;
     *)       _c="$C_RESET" ;;
   esac
-  printf '[%s/%s] %-10s %b%-8s%b' "$_pd" "$_lang" "$_gate" "$_c" "$_st" "$C_RESET"
+  printf '[%s/%s] %-10s %b%-8s%b' "$_project" "$_lang" "$_gate" "$_c" "$_st" "$C_RESET"
   [ -n "$_detail" ] && printf '  %s' "$_detail"
   printf '\n'
 }
 
 # ---------------------------------------------------------------------------
-# Gate 4: COVERAGE (parse output captured in Gate 2 — no re-run)
-# ---------------------------------------------------------------------------
-_coverage() {
-  _pd="$1"; _abs="$2"; _lang="$3"
-  _st=SKIPPED; _rs=""; _ex=null; _log=null
-  _lpct=null; _bpct=null; _fpct=null
-  _thr=$(_get_threshold "$_lang")
-  _t0=$(date +%s)
-  _status_line "$_pd" "$_lang" "coverage" "RUNNING"
-
-  if [ "$DRY_RUN" = "true" ]; then
-    printf '[DRY RUN] coverage parse (no re-run)\n'
-    _st=SKIPPED; _rs="dry-run mode"
-    _t1=$(date +%s); _dur=$((_t1 - _t0))
-    _status_line "$_pd" "$_lang" "coverage" "$_st" "$_rs"
-    _write_state "coverage" "$_st" "$_rs" "$_ex" "$_dur" "$_log"
-    _gr_set "$_pi" coverage lpct "$_lpct"
-    return
-  fi
-
-  _covfile="$WORK/COV_${_pi}"; GATE_COVFILE="$_covfile"
-  if [ ! -f "$_covfile" ]; then
-    _st=SKIPPED; _rs="no coverage data (test gate skipped or failed)"
-    _t1=$(date +%s); _dur=$((_t1 - _t0))
-    _status_line "$_pd" "$_lang" "coverage" "$_st" "$_rs"
-    _write_state "coverage" "$_st" "$_rs" "$_ex" "$_dur" "$_log"
-    _gr_set "$_pi" coverage lpct "$_lpct"
-    return
-  fi
-
-  # Parse line coverage percentage from the captured output
-  _cov_unsupported=false
-  case "$_lang" in
-    typescript|python|go|rust|swift|cpp|java|kotlin|scala|dotnet|ruby|php|elixir)
-      # A recipe with no coverage reader returns non-zero.
-      _lpct=$("_recipe_$_lang" coverage "$_abs") || _cov_unsupported=true ;;
-    *) _cov_unsupported=true ;;
-  esac
-
-  if [ "$_cov_unsupported" = "true" ]; then
-    _st=SKIPPED; _rs="coverage parsing not implemented for $_lang"
-    _t1=$(date +%s); _dur=$((_t1 - _t0))
-    _status_line "$_pd" "$_lang" "coverage" "$_st" "$_rs"
-    _write_state "coverage" "$_st" "$_rs" "$_ex" "$_dur" "$_log"
-    _gr_set "$_pi" coverage lpct "$_lpct"
-    return
-  fi
-
-  if [ -z "$_lpct" ]; then
-    _st=SKIPPED; _rs="coverage output unparseable"
-    cp "$_covfile" "$LOG_DIR/${_pd}-${_lang}-coverage-raw.log" 2>/dev/null || true
-    _log="validation-logs/${_pd}-${_lang}-coverage-raw.log"
-  else
-    _passes=$(awk "BEGIN{print ($_lpct+0 >= $_thr+0) ? \"yes\" : \"no\"}")
-    if [ "$_passes" = "yes" ]; then
-      _st=PASS; _rs=""
-    else
-      _st=FAIL; _rs="${_lpct}% < ${_thr}% threshold"
-      printf '%s\n' "$_rs" > "$WORK/out"
-      _log=$(_save_sidecar "$_pd" "$_lang" coverage)
-    fi
-  fi
-
-  _t1=$(date +%s); _dur=$((_t1 - _t0))
-  [ -n "$_lpct" ] && _detail="(${_lpct}% vs ${_thr}%, ${_dur}s)" || _detail="(${_dur}s)"
-  _status_line "$_pd" "$_lang" "coverage" "$_st" "$_detail"
-  _write_state "coverage" "$_st" "$_rs" "$_ex" "$_dur" "$_log"
-  _gr_set "$_pi" coverage lpct "${_lpct:-null}"
-  _gr_set "$_pi" coverage thr "$_thr"
-}
-
-# ---------------------------------------------------------------------------
 # RUN ALL GATES
 # ---------------------------------------------------------------------------
-_pi=0
-while IFS='|' read -r _pd _lang; do
-  [ -z "$_pd" ] && continue
-  _pi=$((_pi + 1))
-  [ "$_pd" = "root" ] && _abs="$INVOCATION_DIR" || _abs="$INVOCATION_DIR/$_pd"
+_project_index=0
+while IFS='|' read -r _project _lang; do
+  [ -z "$_project" ] && continue
+  _project_index=$((_project_index + 1))
+  [ "$_project" = "root" ] && _abs="$INVOCATION_DIR" || _abs="$INVOCATION_DIR/$_project"
 
-  printf '── [%s / %s] ──────────────────────────────────\n' "$_pd" "$_lang"
-  _run_gate build "$_pd" "$_abs" "$_lang"
-  _run_gate test  "$_pd" "$_abs" "$_lang"
-  _run_gate lint  "$_pd" "$_abs" "$_lang"
-  _coverage "$_pd" "$_abs" "$_lang"
+  printf '── [%s / %s] ──────────────────────────────────\n' "$_project" "$_lang"
+  _run_gate build "$_project" "$_abs" "$_lang"
+  _run_gate test  "$_project" "$_abs" "$_lang"
+  _run_gate lint  "$_project" "$_abs" "$_lang"
+  _run_gate coverage "$_project" "$_abs" "$_lang"
   printf '\n'
 done < "$WORK/projects"
 
 # ---------------------------------------------------------------------------
-# JSON REPORT
+# Totals — read from the Gate Results; used by the report and the summary
 # ---------------------------------------------------------------------------
-if [ "$DRY_RUN" = "false" ]; then
-  _ts=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date '+%Y-%m-%dT%H:%M:%SZ')
-
-  # Count totals
+_summarise() {
   _tp=0; _tg=0; _tpass=0; _tfail=0; _tskip=0; _op=true
-
-  # Build projects JSON
-  _proj_arr=""
-  _pfirst=true
-  _pi=0
-  while IFS='|' read -r _pd _lang; do
-    [ -z "$_pd" ] && continue
-    _pi=$((_pi + 1))
+  _project_index=0
+  while IFS='|' read -r _project _lang; do
+    [ -z "$_project" ] && continue
+    _project_index=$((_project_index + 1))
     _tp=$((_tp + 1))
-    _gates_json=""
-    _gfirst=true
-
     for _gate in build test lint coverage; do
       _tg=$((_tg + 1))
-      _gs=$(_gr_get "$_pi" "$_gate" status); [ -n "$_gs" ] || _gs=SKIPPED
-      _rs=$(_gr_get "$_pi" "$_gate" reason)
-      _ex=$(_gr_get "$_pi" "$_gate" exit); [ -n "$_ex" ] || _ex=null
-      _du=$(_gr_get "$_pi" "$_gate" dur); [ -n "$_du" ] || _du=0
-      _lp=$(_gr_get "$_pi" "$_gate" log); [ -n "$_lp" ] || _lp=null
-
+      _gs=$(_gr_get "$_project_index" "$_gate" status); [ -n "$_gs" ] || _gs=SKIPPED
       case "$_gs" in
         PASS)    _tpass=$((_tpass+1)) ;;
         FAIL)    _tfail=$((_tfail+1)); _op=false ;;
         SKIPPED) _tskip=$((_tskip+1)) ;;
       esac
+    done
+  done < "$WORK/projects"
+}
+
+# ---------------------------------------------------------------------------
+# Validation Report writer — owns the pinned schema, field order, null
+# handling and JSON escaping (ADR-0002). Reads Gate Results and the totals.
+# ---------------------------------------------------------------------------
+_write_report() {
+  _ts=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date '+%Y-%m-%dT%H:%M:%SZ')
+  _proj_arr=""
+  _pfirst=true
+  _project_index=0
+  while IFS='|' read -r _project _lang; do
+    [ -z "$_project" ] && continue
+    _project_index=$((_project_index + 1))
+    _gates_json=""
+    _gfirst=true
+
+    for _gate in build test lint coverage; do
+      _gs=$(_gr_get "$_project_index" "$_gate" status); [ -n "$_gs" ] || _gs=SKIPPED
+      _rs=$(_gr_get "$_project_index" "$_gate" reason)
+      _ex=$(_gr_get "$_project_index" "$_gate" exit); [ -n "$_ex" ] || _ex=null
+      _du=$(_gr_get "$_project_index" "$_gate" dur); [ -n "$_du" ] || _du=0
+      _lp=$(_gr_get "$_project_index" "$_gate" log); [ -n "$_lp" ] || _lp=null
 
       # JSON-escape reason
       _rs_j=$(_json_esc "$_rs")
@@ -911,9 +894,11 @@ if [ "$DRY_RUN" = "false" ]; then
 
       _xtra=""
       if [ "$_gate" = "coverage" ]; then
-        _lpct=$(_gr_get "$_pi" coverage lpct); [ -n "$_lpct" ] || _lpct=null
-        _thr=$(_gr_get "$_pi" coverage thr); [ -n "$_thr" ] || _thr=$COVERAGE_THRESHOLD
-        _xtra=', "line_coverage_pct": '"$_lpct"', "branch_coverage_pct": null, "function_coverage_pct": null, "threshold_pct": '"$_thr"
+        _lpct=$(_gr_get "$_project_index" coverage lpct); [ -n "$_lpct" ] || _lpct=null
+        _bpct=$(_gr_get "$_project_index" coverage bpct); [ -n "$_bpct" ] || _bpct=null
+        _fpct=$(_gr_get "$_project_index" coverage fpct); [ -n "$_fpct" ] || _fpct=null
+        _thr=$(_gr_get "$_project_index" coverage thr); [ -n "$_thr" ] || _thr=$COVERAGE_THRESHOLD
+        _xtra=', "line_coverage_pct": '"$_lpct"', "branch_coverage_pct": '"$_bpct"', "function_coverage_pct": '"$_fpct"', "threshold_pct": '"$_thr"
       fi
 
       _ge='"'"$_gate"'": {"status": "'"$_gs"'", "duration_seconds": '"$_du"', "exit_code": '"$_ex"', "reason": '"$_rs_jv"', "log_file": '"$_lp_j$_xtra"'}'
@@ -922,7 +907,7 @@ if [ "$DRY_RUN" = "false" ]; then
       else _gates_json="$_gates_json, $_ge"; fi
     done
 
-    _pe='{"project_dir": "'"$(_json_esc "$_pd")"'", "language": "'"$_lang"'", "gates": {'"$_gates_json"'}}'
+    _pe='{"project_dir": "'"$(_json_esc "$_project")"'", "language": "'"$_lang"'", "gates": {'"$_gates_json"'}}'
     if [ "$_pfirst" = "true" ]; then _proj_arr="$_pe"; _pfirst=false
     else _proj_arr="$_proj_arr, $_pe"; fi
   done < "$WORK/projects"
@@ -943,6 +928,12 @@ if [ "$DRY_RUN" = "false" ]; then
   }
 }
 ENDJSON
+}
+
+_op=true
+if [ "$DRY_RUN" = "false" ]; then
+  _summarise
+  _write_report
 fi
 
 # ---------------------------------------------------------------------------
@@ -953,16 +944,16 @@ printf '┌──────────────┬────────
 printf '│ %-12s │ %-10s │ %-9s │ %-8s │ %-42s │\n' "Project" "Language" "Gate" "Result" "Detail"
 printf '├──────────────┼────────────┼───────────┼──────────┼────────────────────────────────────────────┤\n'
 
-_pi=0
-while IFS='|' read -r _pd _lang; do
-  [ -z "$_pd" ] && continue
-  _pi=$((_pi + 1))
+_project_index=0
+while IFS='|' read -r _project _lang; do
+  [ -z "$_project" ] && continue
+  _project_index=$((_project_index + 1))
   for _gate in build test lint coverage; do
-    _gs=$(_gr_get "$_pi" "$_gate" status); [ -n "$_gs" ] || _gs=SKIPPED
-    _rs=$(_gr_get "$_pi" "$_gate" reason)
+    _gs=$(_gr_get "$_project_index" "$_gate" status); [ -n "$_gs" ] || _gs=SKIPPED
+    _rs=$(_gr_get "$_project_index" "$_gate" reason)
     _detail=$(printf '%.42s' "$_rs")
     printf '│ %-12s │ %-10s │ %-9s │ %-8s │ %-42s │\n' \
-      "$_pd" "$_lang" "$_gate" "$_gs" "$_detail"
+      "$_project" "$_lang" "$_gate" "$_gs" "$_detail"
   done
 done < "$WORK/projects"
 
