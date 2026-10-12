@@ -8,7 +8,7 @@ Parent spec: GitHub issue #7 (Spec: Language Recipes, gate runner and Gate Resul
 
 **Status:** ready-for-agent
 
-- [ ] Each of the three Languages is a recipe that runs through the runner.
-- [ ] The ticket 01 tests for these Languages pass unchanged.
-- [ ] The old per-Language branches for them are no longer reachable.
-- [ ] Full harness passes.
+- [x] Each of the three Languages is a recipe that runs through the runner.
+- [x] The ticket 01 tests for these Languages pass unchanged.
+- [x] The old per-Language branches for them are no longer reachable.
+- [x] Full harness passes.

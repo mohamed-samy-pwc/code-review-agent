@@ -123,7 +123,7 @@ printf 'Scanning: %s\n' "$INVOCATION_DIR"
 # (or gate_exec + gate_finish when a Gate runs more than one command).
 # `coverage` prints the line-coverage percentage (nothing if unparseable).
 # ---------------------------------------------------------------------------
-RECIPE_LANGS="typescript python go rust swift cpp"
+RECIPE_LANGS="typescript python java kotlin go rust swift cpp scala"
 _try_recipe() { "_recipe_$1" detect "$_d" && printf '%s' "$1"; }
 _is_recipe() { case " $RECIPE_LANGS " in *" $1 "*) return 0 ;; esac; return 1; }
 
@@ -377,6 +377,109 @@ _recipe_cpp() {
   esac
 }
 
+# Line coverage from a JaCoCo XML report; prints "null" when there is none.
+_jacoco_line_pct() {
+  _jxml="$1/target/site/jacoco/jacoco.xml"
+  [ -f "$1/build/reports/jacoco/test/jacocoTestReport.xml" ] && \
+    _jxml="$1/build/reports/jacoco/test/jacocoTestReport.xml"
+  _jp=null
+  if [ -f "$_jxml" ]; then
+    _missed=$(grep 'type="LINE"' "$_jxml" | tail -1 | sed 's/.*missed="\([0-9]*\)".*/\1/')
+    _cov=$(grep 'type="LINE"' "$_jxml" | tail -1 | sed 's/.*covered="\([0-9]*\)".*/\1/')
+    [ -n "$_missed" ] && [ -n "$_cov" ] && _tot=$((_missed + _cov)) && [ "$_tot" -gt 0 ] && \
+      _jp=$(awk "BEGIN{printf \"%.1f\",($_cov/$_tot)*100}")
+  fi
+  printf '%s' "$_jp"
+}
+
+_recipe_java() {
+  _req="$1"; _d="$2"
+  case "$_req" in
+    detect)
+      { [ -f "$_d/pom.xml" ] || [ -f "$_d/build.gradle" ]; } ;;
+    has_tests) [ -d "$_d/src/test" ] ;;
+    build)
+      if [ -f "$_d/mvnw" ]; then
+        gate_run "mvnw failed" "(cd '$_d' && ./mvnw package -DskipTests)"
+      elif command -v mvn >/dev/null 2>&1; then
+        gate_run "mvn failed" "(cd '$_d' && mvn package -DskipTests)"
+      elif [ -f "$_d/gradlew" ]; then
+        gate_run "gradlew assemble failed" "(cd '$_d' && ./gradlew assemble)"
+      else
+        gate_skip "toolchain not installed"
+      fi ;;
+    test) _jvm_test "$_d" ;;
+    lint)
+      if [ -f "$_d/mvnw" ]; then
+        gate_run "checkstyle failed" "(cd '$_d' && ./mvnw checkstyle:check)"
+      elif [ -f "$_d/gradlew" ]; then
+        gate_run "checkstyle failed" "(cd '$_d' && ./gradlew checkstyleMain)"
+      else
+        gate_skip "linter not installed"
+      fi ;;
+    coverage) _jacoco_line_pct "$_d"; return 0 ;;
+  esac
+}
+
+_recipe_kotlin() {
+  _req="$1"; _d="$2"
+  case "$_req" in
+    detect)
+      [ -f "$_d/build.gradle.kts" ] || \
+        { [ -f "$_d/build.gradle" ] && ls "$_d"/*.kt >/dev/null 2>&1; } ;;
+    has_tests) [ -d "$_d/src/test" ] ;;
+    build)
+      if [ -f "$_d/gradlew" ]; then
+        gate_run "gradlew assemble failed" "(cd '$_d' && ./gradlew assemble)"
+      else
+        gate_skip "toolchain not installed"
+      fi ;;
+    test) _jvm_test "$_d" ;;
+    lint)
+      if [ -f "$_d/gradlew" ]; then
+        gate_run "ktlint failed" "(cd '$_d' && ./gradlew ktlintCheck)"
+      else
+        gate_skip "linter not installed"
+      fi ;;
+    coverage) _jacoco_line_pct "$_d"; return 0 ;;
+  esac
+}
+
+# Test Gate shared by the JVM Languages (Java, Kotlin).
+_jvm_test() {
+  if [ -f "$1/mvnw" ]; then gate_run "test failed" "(cd '$1' && ./mvnw test)"
+  elif command -v mvn >/dev/null 2>&1; then gate_run "test failed" "(cd '$1' && mvn test)"
+  elif [ -f "$1/gradlew" ]; then gate_run "test failed" "(cd '$1' && ./gradlew test)"
+  else gate_skip "toolchain not installed"; fi
+}
+
+_recipe_scala() {
+  _req="$1"; _d="$2"
+  case "$_req" in
+    detect)    [ -f "$_d/build.sbt" ] ;;
+    has_tests) [ -d "$_d/src/test" ] ;;
+    build)
+      if command -v sbt >/dev/null 2>&1; then
+        gate_run "sbt compile failed" "(cd '$_d' && sbt compile)"
+      else
+        gate_skip "toolchain not installed (sbt not found)"
+      fi ;;
+    test)
+      if command -v sbt >/dev/null 2>&1; then
+        gate_run "sbt test failed" "(cd '$_d' && sbt 'testOnly *Unit*' || sbt test)"
+      else
+        gate_skip "toolchain not installed (sbt not found)"
+      fi ;;
+    lint)
+      if command -v sbt >/dev/null 2>&1; then
+        gate_run "scalastyle failed" "(cd '$_d' && sbt scalastyle)"
+      else
+        gate_skip "toolchain not installed (sbt not found)"
+      fi ;;
+    coverage) return 1 ;;
+  esac
+}
+
 # ---------------------------------------------------------------------------
 # Gate runner — owns timing, status classification, Sidecar Log writing,
 # dry-run and verbose handling, and the Hard Gate rule that a Project with no
@@ -451,11 +554,8 @@ _detect_lang() {
   _d="$1"
   _try_recipe typescript && return
   _try_recipe python && return
-  [ -f "$_d/build.gradle.kts" ] && printf 'kotlin' && return
-  { [ -f "$_d/build.gradle" ] && ls "$_d"/*.kt >/dev/null 2>&1; } \
-    && printf 'kotlin' && return
-  { [ -f "$_d/pom.xml" ] || [ -f "$_d/build.gradle" ]; } \
-    && printf 'java' && return
+  _try_recipe kotlin && return
+  _try_recipe java && return
   # go.mod is canonical — *.go files may appear in vendor/ of non-Go projects
   _try_recipe go && return
   _try_recipe rust && return
@@ -466,7 +566,7 @@ _detect_lang() {
   _try_recipe swift && return
   _try_recipe cpp && return
   [ -f "$_d/mix.exs" ]        && printf 'elixir' && return
-  [ -f "$_d/build.sbt" ]      && printf 'scala'  && return
+  _try_recipe scala && return
 }
 
 > "$WORK/projects"
@@ -548,12 +648,10 @@ _status_line() {
 _has_tests() {
   _d="$1"; _l="$2"
   case "$_l" in
-    java|kotlin) [ -d "$_d/src/test" ] ;;
     dotnet) find "$_d" \( -name '*Tests.cs' -o -name '*Test.cs' \) 2>/dev/null | grep -q . ;;
     ruby)   find "$_d" \( -name '*_spec.rb' -o -name '*_test.rb' \) 2>/dev/null | grep -q . ;;
     php)    find "$_d" -name '*Test.php' 2>/dev/null | grep -q . ;;
     elixir) find "$_d" -name '*_test.exs' 2>/dev/null | grep -q . ;;
-    scala)  [ -d "$_d/src/test" ] ;;
     *)      return 1 ;;
   esac
 }
@@ -575,26 +673,6 @@ _build() {
   }
 
   case "$_lang" in
-    java)
-      if [ -f "$_abs/mvnw" ]; then
-        _run "(cd '$_abs' && ./mvnw package -DskipTests)" && { _st=PASS; _rs=""; _ex=0; } || \
-          { _ex=$?; _st=FAIL; _rs="mvnw failed"; _log=$(_save_sidecar "$_pd" "$_lang" build); }
-      elif command -v mvn >/dev/null 2>&1; then
-        _run "(cd '$_abs' && mvn package -DskipTests)" && { _st=PASS; _rs=""; _ex=0; } || \
-          { _ex=$?; _st=FAIL; _rs="mvn failed"; _log=$(_save_sidecar "$_pd" "$_lang" build); }
-      elif [ -f "$_abs/gradlew" ]; then
-        _run "(cd '$_abs' && ./gradlew assemble)" && { _st=PASS; _rs=""; _ex=0; } || \
-          { _ex=$?; _st=FAIL; _rs="gradlew assemble failed"; _log=$(_save_sidecar "$_pd" "$_lang" build); }
-      else
-        _st=SKIPPED; _rs="toolchain not installed"
-      fi ;;
-    kotlin)
-      if [ -f "$_abs/gradlew" ]; then
-        _run "(cd '$_abs' && ./gradlew assemble)" && { _st=PASS; _rs=""; _ex=0; } || \
-          { _ex=$?; _st=FAIL; _rs="gradlew assemble failed"; _log=$(_save_sidecar "$_pd" "$_lang" build); }
-      else
-        _st=SKIPPED; _rs="toolchain not installed"
-      fi ;;
     dotnet)
       if command -v dotnet >/dev/null 2>&1; then
         _run "(cd '$_abs' && dotnet restore && dotnet build)" && { _st=PASS; _rs=""; _ex=0; } || \
@@ -623,13 +701,6 @@ _build() {
           { _ex=$?; _st=FAIL; _rs="mix compile failed"; _log=$(_save_sidecar "$_pd" "$_lang" build); }
       else
         _st=SKIPPED; _rs="toolchain not installed (mix not found)"
-      fi ;;
-    scala)
-      if command -v sbt >/dev/null 2>&1; then
-        _run "(cd '$_abs' && sbt compile)" && { _st=PASS; _rs=""; _ex=0; } || \
-          { _ex=$?; _st=FAIL; _rs="sbt compile failed"; _log=$(_save_sidecar "$_pd" "$_lang" build); }
-      else
-        _st=SKIPPED; _rs="toolchain not installed (sbt not found)"
       fi ;;
     *) _st=SKIPPED; _rs="unknown language" ;;
   esac
@@ -670,18 +741,6 @@ _test() {
   }
 
   case "$_lang" in
-    java|kotlin)
-      if [ -f "$_abs/mvnw" ]; then _tcmd="(cd '$_abs' && ./mvnw test)"
-      elif command -v mvn >/dev/null 2>&1; then _tcmd="(cd '$_abs' && mvn test)"
-      elif [ -f "$_abs/gradlew" ]; then _tcmd="(cd '$_abs' && ./gradlew test)"
-      else _st=SKIPPED; _rs="toolchain not installed"
-        _t1=$(date +%s); _dur=$((_t1 - _t0))
-        _status_line "$_pd" "$_lang" "test" "$_st" "$_rs"
-        _write_state "test" "$_st" "$_rs" "$_ex" "$_dur" "$_log"; return; fi
-      _run_test "$_tcmd" && _ex=0 || _ex=$?
-      cp "$WORK/out" "$_covfile" 2>/dev/null || true
-      if [ "$_ex" = "0" ]; then _st=PASS; _rs=""
-      else _st=FAIL; _rs="test failed"; _log=$(_save_sidecar "$_pd" "$_lang" test); fi ;;
     dotnet)
       if command -v dotnet >/dev/null 2>&1; then
         _run_test "(cd '$_abs' && dotnet test --no-build --collect:'XPlat Code Coverage')" \
@@ -720,15 +779,6 @@ _test() {
       else
         _st=SKIPPED; _rs="toolchain not installed (mix not found)"
       fi ;;
-    scala)
-      if command -v sbt >/dev/null 2>&1; then
-        _run_test "(cd '$_abs' && sbt 'testOnly *Unit*' || sbt test)" && _ex=0 || _ex=$?
-        cp "$WORK/out" "$_covfile" 2>/dev/null || true
-        if [ "$_ex" = "0" ]; then _st=PASS; _rs=""
-        else _st=FAIL; _rs="sbt test failed"; _log=$(_save_sidecar "$_pd" "$_lang" test); fi
-      else
-        _st=SKIPPED; _rs="toolchain not installed (sbt not found)"
-      fi ;;
     *) _st=SKIPPED; _rs="unknown language" ;;
   esac
 
@@ -754,23 +804,6 @@ _lint() {
   }
 
   case "$_lang" in
-    java)
-      if [ -f "$_abs/mvnw" ]; then
-        _run_lint "(cd '$_abs' && ./mvnw checkstyle:check)" && { _st=PASS; _ex=0; } || \
-          { _ex=$?; _st=FAIL; _rs="checkstyle failed"; _log=$(_save_sidecar "$_pd" "$_lang" lint); }
-      elif [ -f "$_abs/gradlew" ]; then
-        _run_lint "(cd '$_abs' && ./gradlew checkstyleMain)" && { _st=PASS; _ex=0; } || \
-          { _ex=$?; _st=FAIL; _rs="checkstyle failed"; _log=$(_save_sidecar "$_pd" "$_lang" lint); }
-      else
-        _st=SKIPPED; _rs="linter not installed"
-      fi ;;
-    kotlin)
-      if [ -f "$_abs/gradlew" ]; then
-        _run_lint "(cd '$_abs' && ./gradlew ktlintCheck)" && { _st=PASS; _ex=0; } || \
-          { _ex=$?; _st=FAIL; _rs="ktlint failed"; _log=$(_save_sidecar "$_pd" "$_lang" lint); }
-      else
-        _st=SKIPPED; _rs="linter not installed"
-      fi ;;
     dotnet)
       if command -v dotnet >/dev/null 2>&1; then
         _run_lint "(cd '$_abs' && dotnet format --verify-no-changes)" && { _st=PASS; _ex=0; } || \
@@ -798,13 +831,6 @@ _lint() {
           { _ex=$?; _st=FAIL; _rs="mix credo failed"; _log=$(_save_sidecar "$_pd" "$_lang" lint); }
       else
         _st=SKIPPED; _rs="toolchain not installed (mix not found)"
-      fi ;;
-    scala)
-      if command -v sbt >/dev/null 2>&1; then
-        _run_lint "(cd '$_abs' && sbt scalastyle)" && { _st=PASS; _ex=0; } || \
-          { _ex=$?; _st=FAIL; _rs="scalastyle failed"; _log=$(_save_sidecar "$_pd" "$_lang" lint); }
-      else
-        _st=SKIPPED; _rs="toolchain not installed (sbt not found)"
       fi ;;
     *) _st=SKIPPED; _rs="unknown language" ;;
   esac
@@ -849,19 +875,9 @@ _coverage() {
   # Parse line coverage percentage from the captured output
   _cov_unsupported=false
   case "$_lang" in
-    typescript|python|go|rust|swift|cpp)
+    typescript|python|go|rust|swift|cpp|java|kotlin|scala)
       # A recipe with no coverage reader returns non-zero.
       _lpct=$("_recipe_$_lang" coverage "$_abs") || _cov_unsupported=true ;;
-    java|kotlin)
-      _jxml="$_abs/target/site/jacoco/jacoco.xml"
-      [ -f "$_abs/build/reports/jacoco/test/jacocoTestReport.xml" ] && \
-        _jxml="$_abs/build/reports/jacoco/test/jacocoTestReport.xml"
-      if [ -f "$_jxml" ]; then
-        _missed=$(grep 'type="LINE"' "$_jxml" | tail -1 | sed 's/.*missed="\([0-9]*\)".*/\1/')
-        _cov=$(grep 'type="LINE"' "$_jxml" | tail -1 | sed 's/.*covered="\([0-9]*\)".*/\1/')
-        [ -n "$_missed" ] && [ -n "$_cov" ] && _tot=$((_missed + _cov)) && [ "$_tot" -gt 0 ] && \
-          _lpct=$(awk "BEGIN{printf \"%.1f\",($_cov/$_tot)*100}")
-      fi ;;
     php)
       _lpct=$(grep 'Lines:' "$_covfile" 2>/dev/null | \
         grep -o '[0-9]*\.[0-9]*%' | sed 's/%//' | head -1) ;;
