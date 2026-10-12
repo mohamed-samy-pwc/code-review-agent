@@ -138,14 +138,11 @@ Write-Host "Scanning: $InvocationDir"
 # Invoke-GateExec + Complete-Gate when a Gate runs more than one command).
 # `coverage` returns the line-coverage percentage, or nothing if unparseable.
 # ---------------------------------------------------------------------------
-$RecipeLangs = @('typescript', 'python')
-function Test-IsRecipe { param([string]$Lang) return $RecipeLangs -contains $Lang }
-
 $script:Gate = $null
 function New-GateState {
     $script:Gate = [pscustomobject]@{
         Status = 'SKIPPED'; Reason = ''; ExitCode = $null; LogFile = $null
-        Last = $null; CovContent = $null
+        Last = $null; CovContent = $null; CovUnsupported = $false; NoCoverage = $false
         Proj = ''; Lang = ''; Name = ''
     }
 }
@@ -170,6 +167,25 @@ function Complete-Gate { param([string]$FailReason)
     $script:Gate.Reason   = $FailReason.Replace('{exit}', [string]$r.ExitCode)
     $script:Gate.LogFile  = Save-Sidecar $script:Gate.Proj $script:Gate.Lang $script:Gate.Name $r.Output
 }
+
+# Run steps in order, stopping at the first failure ('and', like a && b) or the
+# first success ('or', like a || b). Outputs are concatenated.
+function New-GateStep { param([string]$Exe, [string[]]$ToolArgs) return [pscustomobject]@{ Exe = $Exe; ToolArgs = $ToolArgs } }
+function Invoke-GateSeq { param([string]$Dir, [string]$Mode, [object[]]$Steps)
+    $out = ''; $last = $null
+    foreach ($step in $Steps) {
+        $last = Invoke-Tool $Dir $step.ToolArgs $step.Exe
+        $out += $last.Output
+        if ($Mode -eq 'and' -and $last.ExitCode -ne 0) { break }
+        if ($Mode -eq 'or'  -and $last.ExitCode -eq 0) { break }
+    }
+    $script:Gate.Last = @{ ExitCode = $last.ExitCode; Output = $out }
+}
+
+# The test run left no coverage output to parse later.
+function Set-GateNoCoverage { $script:Gate.NoCoverage = $true }
+# The Language has no coverage reader.
+function Set-GateCoverageUnsupported { $script:Gate.CovUnsupported = $true }
 
 function Invoke-GateRun { param([string]$FailReason, [string]$Dir, [string]$Exe, [string[]]$ToolArgs)
     Invoke-GateExec $Dir $Exe $ToolArgs
@@ -196,7 +212,7 @@ function Invoke-Gate { param([string]$Name, $P)
     & "Recipe-$lang" $Name $abs
 
     # Coverage is parsed later from the test Gate's captured output.
-    if ($Name -eq 'test' -and $script:Gate.Last -and $script:Gate.Last.Output) {
+    if ($Name -eq 'test' -and $script:Gate.Last -and -not $script:Gate.NoCoverage -and -not $DryRun) {
         $covFile = Join-Path $WorkDir "COV_${pd}_${lang}.txt"
         Set-Content -Path $covFile -Value $script:Gate.Last.Output -Encoding UTF8
     }
@@ -226,7 +242,7 @@ function Recipe-typescript { param([string]$Req, [string]$Dir)
             } else { Set-GateSkip 'no build script and tsc not found' }
         }
         'test' {
-            if (-not (Find-Cmd 'npm')) { Set-GateSkip 'toolchain not installed'; return }
+            if (-not (Find-Cmd 'npm')) { Set-GateSkip 'toolchain not installed (npm not found)'; return }
             Invoke-GateExec $Dir 'npm' @('test','--','--coverage','--coverageReporters=text','--testPathPattern=(unit|spec)','--forceExit')
             # Fallback if no tests matched pattern
             if ($script:Gate.Last.Output -match 'Your test suite must contain at least one test|No tests found') {
@@ -253,7 +269,9 @@ function Recipe-typescript { param([string]$Req, [string]$Dir)
 }
 
 function Recipe-python { param([string]$Req, [string]$Dir)
-    $py = Get-PythonPath
+    # detect runs before the helper functions below are defined, so only look up Python when needed.
+    $py = $null
+    if ($Req -in 'build','test','lint') { $py = Get-PythonPath }
     switch ($Req) {
         'detect' {
             return ((Test-Path "$Dir/pyproject.toml") -or (Test-Path "$Dir/setup.py") -or
@@ -268,7 +286,7 @@ function Recipe-python { param([string]$Req, [string]$Dir)
             } else { Set-GateSkip 'no build tool detected' }
         }
         'test' {
-            if (-not $py) { Set-GateSkip 'python not found'; return }
+            if (-not $py) { Set-GateSkip 'toolchain not installed (python not found)'; return }
             Invoke-GateExec $Dir $py @('-m','pytest','-m','unit','--cov=src','--cov-report=term-missing','-q')
             if ($script:Gate.Last.ExitCode -eq 5) {
                 Invoke-GateExec $Dir $py @('-m','pytest','--cov=src','--cov-report=term-missing','-q')
@@ -282,6 +300,10 @@ function Recipe-python { param([string]$Req, [string]$Dir)
                 Invoke-GateRun 'ruff failed' $Dir $py @('-m','ruff','check','.')
             } elseif (Find-Cmd 'flake8') {
                 Invoke-GateRun 'flake8 failed' $Dir 'flake8' @('.')
+            } elseif ($py -and (Test-PythonModule $py @('-m','flake8','--version'))) {
+                Invoke-GateRun 'flake8 failed' $Dir $py @('-m','flake8','.')
+            } elseif (Find-Cmd 'pylint') {
+                Invoke-GateRun 'pylint failed' $Dir 'pylint' @('src/')
             } else { Set-GateSkip 'linter not installed (ruff/flake8/pylint not found)' }
         }
         'coverage' {
@@ -292,31 +314,312 @@ function Recipe-python { param([string]$Req, [string]$Dir)
     }
 }
 
+# Line coverage from a JaCoCo XML report (Java, Kotlin); nothing when absent.
+function Get-JacocoLinePct { param([string]$Dir)
+    $xml = "$Dir/target/site/jacoco/jacoco.xml"
+    if (Test-Path "$Dir/build/reports/jacoco/test/jacocoTestReport.xml") { $xml = "$Dir/build/reports/jacoco/test/jacocoTestReport.xml" }
+    if (-not (Test-Path $xml)) { return }
+    $line = Select-String -Path $xml -Pattern 'type="LINE"' | Select-Object -Last 1
+    if ($line -and $line.Line -match '.*missed="(\d+)"') {
+        $missed = [int]$Matches[1]
+        if ($line.Line -match '.*covered="(\d+)"') {
+            $total = $missed + [int]$Matches[1]
+            if ($total -gt 0) { return [Math]::Round([int]$Matches[1] / $total * 100, 1, [MidpointRounding]::AwayFromZero) }
+        }
+    }
+}
+
+# Test Gate shared by the JVM Languages (Java, Kotlin).
+function Invoke-JvmTest { param([string]$Dir)
+    if (Test-Path "$Dir/mvnw")        { Invoke-GateRun 'test failed' $Dir "$Dir/mvnw" @('test') }
+    elseif (Find-Cmd 'mvn')           { Invoke-GateRun 'test failed' $Dir 'mvn' @('test') }
+    elseif (Test-Path "$Dir/gradlew") { Invoke-GateRun 'test failed' $Dir "$Dir/gradlew" @('test') }
+    else { Set-GateSkip 'toolchain not installed' }
+}
+
+function Recipe-java { param([string]$Req, [string]$Dir)
+    switch ($Req) {
+        'detect'    { return ((Test-Path "$Dir/pom.xml") -or (Test-Path "$Dir/build.gradle")) }
+        'has_tests' { return (Test-Path "$Dir/src/test") }
+        'build' {
+            if (Test-Path "$Dir/mvnw")        { Invoke-GateRun 'mvnw failed' $Dir "$Dir/mvnw" @('package','-DskipTests') }
+            elseif (Find-Cmd 'mvn')           { Invoke-GateRun 'mvn failed' $Dir 'mvn' @('package','-DskipTests') }
+            elseif (Test-Path "$Dir/gradlew") { Invoke-GateRun 'gradlew assemble failed' $Dir "$Dir/gradlew" @('assemble') }
+            else { Set-GateSkip 'toolchain not installed' }
+        }
+        'test' { Invoke-JvmTest $Dir }
+        'lint' {
+            if (Test-Path "$Dir/mvnw")        { Invoke-GateRun 'checkstyle failed' $Dir "$Dir/mvnw" @('checkstyle:check') }
+            elseif (Test-Path "$Dir/gradlew") { Invoke-GateRun 'checkstyle failed' $Dir "$Dir/gradlew" @('checkstyleMain') }
+            else { Set-GateSkip 'linter not installed' }
+        }
+        'coverage' { return Get-JacocoLinePct $Dir }
+    }
+}
+
+function Recipe-kotlin { param([string]$Req, [string]$Dir)
+    switch ($Req) {
+        'detect' {
+            if (Test-Path "$Dir/build.gradle.kts") { return $true }
+            return ((Test-Path "$Dir/build.gradle") -and [bool](Get-ChildItem -Path $Dir -Filter '*.kt' -ErrorAction SilentlyContinue))
+        }
+        'has_tests' { return (Test-Path "$Dir/src/test") }
+        'build' {
+            if (Test-Path "$Dir/gradlew") { Invoke-GateRun 'gradlew assemble failed' $Dir "$Dir/gradlew" @('assemble') }
+            else { Set-GateSkip 'toolchain not installed' }
+        }
+        'test' { Invoke-JvmTest $Dir }
+        'lint' {
+            if (Test-Path "$Dir/gradlew") { Invoke-GateRun 'ktlint failed' $Dir "$Dir/gradlew" @('ktlintCheck') }
+            else { Set-GateSkip 'linter not installed' }
+        }
+        'coverage' { return Get-JacocoLinePct $Dir }
+    }
+}
+
+function Recipe-go { param([string]$Req, [string]$Dir)
+    switch ($Req) {
+        # go.mod is canonical — *.go files may appear in vendor/ of non-Go projects
+        'detect'    { return (Test-Path "$Dir/go.mod") }
+        'has_tests' { return $null -ne (Get-ChildItem -Path $Dir -Recurse -Filter '*_test.go' -ErrorAction SilentlyContinue | Select-Object -First 1) }
+        'build' {
+            if (Find-Cmd 'go') { Invoke-GateRun 'go build failed' $Dir 'go' @('build','./...') }
+            else { Set-GateSkip 'toolchain not installed (go not found)' }
+        }
+        'test' {
+            if (Find-Cmd 'go') {
+                $covOut = Join-Path $WorkDir 'cov.out'
+                Invoke-GateSeq $Dir 'and' @((New-GateStep 'go' @('test','-short',"-coverprofile=$covOut",'./...')),
+                                            (New-GateStep 'go' @('tool','cover',"-func=$covOut")))
+                Complete-Gate 'go test failed'
+            } else { Set-GateSkip 'toolchain not installed (go not found)' }
+        }
+        'lint' {
+            if (-not (Find-Cmd 'go')) { Set-GateSkip 'toolchain not installed (go not found)'; return }
+            # go vet is always available when Go is installed
+            if (Find-Cmd 'golangci-lint') { Invoke-GateRun 'golangci-lint failed' $Dir 'golangci-lint' @('run') }
+            else { Invoke-GateRun 'go vet failed' $Dir 'go' @('vet','./...') }
+        }
+        'coverage' {
+            if ($script:Gate.CovContent -match 'total:\s+\(statements\)\s+([\d.]+)%') { return [double]$Matches[1] }
+        }
+    }
+}
+
+function Recipe-rust { param([string]$Req, [string]$Dir)
+    switch ($Req) {
+        'detect' { return (Test-Path "$Dir/Cargo.toml") }
+        'has_tests' {
+            if (Test-Path "$Dir/tests") { return $true }
+            return $null -ne (Get-ChildItem -Path "$Dir/src" -Recurse -File -ErrorAction SilentlyContinue |
+                Select-String -Pattern '\[cfg\(test\)\]' -ErrorAction SilentlyContinue | Select-Object -First 1)
+        }
+        'build' {
+            if (Find-Cmd 'cargo') { Invoke-GateRun 'cargo build failed' $Dir 'cargo' @('build') }
+            else { Set-GateSkip 'toolchain not installed (cargo not found)' }
+        }
+        'test' {
+            if (Find-Cmd 'cargo') { Invoke-GateRun 'cargo test failed' $Dir 'cargo' @('test','--lib') }
+            else { Set-GateSkip 'toolchain not installed (cargo not found)' }
+        }
+        'lint' {
+            if (Find-Cmd 'cargo') { Invoke-GateRun 'clippy failed' $Dir 'cargo' @('clippy','--','-D','warnings') }
+            else { Set-GateSkip 'toolchain not installed (cargo not found)' }
+        }
+        'coverage' {
+            if ($script:Gate.CovContent -match 'TOTAL\s+.*\s+([\d.]+)%') { return [double]$Matches[1] }
+            if ($script:Gate.CovContent -match '([\d.]+)% coverage') { return [double]$Matches[1] }
+        }
+    }
+}
+
+function Recipe-dotnet { param([string]$Req, [string]$Dir)
+    switch ($Req) {
+        'detect' {
+            return ([bool](Get-ChildItem -Path $Dir -Filter '*.csproj' -ErrorAction SilentlyContinue) -or
+                    [bool](Get-ChildItem -Path $Dir -Filter '*.sln' -ErrorAction SilentlyContinue) -or
+                    (Test-Path "$Dir/global.json"))
+        }
+        'has_tests' { return $null -ne (Get-ChildItem -Path $Dir -Recurse -Include '*Tests.cs','*Test.cs' -ErrorAction SilentlyContinue | Select-Object -First 1) }
+        'build' {
+            if (Find-Cmd 'dotnet') {
+                Invoke-GateSeq $Dir 'and' @((New-GateStep 'dotnet' @('restore')), (New-GateStep 'dotnet' @('build')))
+                Complete-Gate 'dotnet build failed'
+            } else { Set-GateSkip 'toolchain not installed (dotnet not found)' }
+        }
+        'test' {
+            if (Find-Cmd 'dotnet') { Invoke-GateRun 'dotnet test failed' $Dir 'dotnet' @('test','--no-build','--collect:XPlat Code Coverage') }
+            else { Set-GateSkip 'toolchain not installed (dotnet not found)' }
+        }
+        'lint' {
+            if (Find-Cmd 'dotnet') { Invoke-GateRun 'dotnet format failed' $Dir 'dotnet' @('format','--verify-no-changes') }
+            else { Set-GateSkip 'toolchain not installed (dotnet not found)' }
+        }
+        'coverage' { Set-GateCoverageUnsupported }
+    }
+}
+
+function Recipe-ruby { param([string]$Req, [string]$Dir)
+    switch ($Req) {
+        'detect'    { return (Test-Path "$Dir/Gemfile") }
+        'has_tests' { return $null -ne (Get-ChildItem -Path $Dir -Recurse -Include '*_spec.rb','*_test.rb' -ErrorAction SilentlyContinue | Select-Object -First 1) }
+        'build' {
+            if ((Find-Cmd 'bundle') -and (Test-Path "$Dir/Rakefile") -and ((Get-Content "$Dir/Rakefile" -Raw) -match 'build')) {
+                Invoke-GateRun 'rake build failed' $Dir 'bundle' @('exec','rake','build')
+            } else { Set-GateSkip 'no build step detected' }
+        }
+        'test' {
+            if (Find-Cmd 'bundle') {
+                Invoke-GateSeq $Dir 'or' @((New-GateStep 'bundle' @('exec','rspec','--tag','unit','spec/')),
+                                           (New-GateStep 'bundle' @('exec','rspec','spec/')))
+                Complete-Gate 'rspec failed'
+            } else { Set-GateSkip 'toolchain not installed (bundle not found)' }
+        }
+        'lint' {
+            if (Find-Cmd 'bundle') { Invoke-GateRun 'rubocop failed' $Dir 'bundle' @('exec','rubocop') }
+            else { Set-GateSkip 'linter not installed (bundle not found)' }
+        }
+        'coverage' { Set-GateCoverageUnsupported }
+    }
+}
+
+function Recipe-php { param([string]$Req, [string]$Dir)
+    switch ($Req) {
+        'detect'    { return (Test-Path "$Dir/composer.json") }
+        'has_tests' { return $null -ne (Get-ChildItem -Path $Dir -Recurse -Filter '*Test.php' -ErrorAction SilentlyContinue | Select-Object -First 1) }
+        'build' {
+            if (Find-Cmd 'composer') { Invoke-GateRun 'composer install failed' $Dir 'composer' @('install','--no-dev') }
+            else { Set-GateSkip 'toolchain not installed (composer not found)' }
+        }
+        'test' {
+            if (Test-Path "$Dir/vendor/bin/phpunit") { Invoke-GateRun 'phpunit failed' $Dir "$Dir/vendor/bin/phpunit" @('--coverage-text') }
+            else { Set-GateSkip 'toolchain not installed (phpunit not found)' }
+        }
+        'lint' {
+            if (Test-Path "$Dir/vendor/bin/phpstan") { Invoke-GateRun 'phpstan failed' $Dir "$Dir/vendor/bin/phpstan" @('analyse') }
+            else { Set-GateSkip 'linter not installed (phpstan/psalm not found)' }
+        }
+        'coverage' {
+            if ($script:Gate.CovContent -match 'Lines:\s+([\d.]+)%') { return [double]$Matches[1] }
+        }
+    }
+}
+
+function Recipe-swift { param([string]$Req, [string]$Dir)
+    switch ($Req) {
+        'detect' {
+            return ((Test-Path "$Dir/Package.swift") -or
+                    [bool](Get-ChildItem -Path $Dir -Filter '*.xcodeproj' -ErrorAction SilentlyContinue))
+        }
+        'has_tests' { return $null -ne (Get-ChildItem -Path $Dir -Recurse -Filter '*Tests.swift' -ErrorAction SilentlyContinue | Select-Object -First 1) }
+        'build' {
+            if (Find-Cmd 'swift') { Invoke-GateRun 'swift build failed' $Dir 'swift' @('build') }
+            else { Set-GateSkip 'toolchain not installed (swift not found)' }
+        }
+        'test' {
+            if (Find-Cmd 'swift') { Invoke-GateRun 'swift test failed' $Dir 'swift' @('test','--enable-code-coverage') }
+            else { Set-GateSkip 'toolchain not installed (swift not found)' }
+        }
+        'lint' {
+            if (Find-Cmd 'swiftlint') { Invoke-GateRun 'swiftlint failed' $Dir 'swiftlint' @() }
+            else { Set-GateSkip 'linter not installed (swiftlint not found)' }
+        }
+        'coverage' { Set-GateCoverageUnsupported }
+    }
+}
+
+function Recipe-cpp { param([string]$Req, [string]$Dir)
+    switch ($Req) {
+        'detect' {
+            if (Test-Path "$Dir/CMakeLists.txt") { return $true }
+            $cFiles = Get-ChildItem -Path $Dir -Filter '*.c' -ErrorAction SilentlyContinue
+            $cppFiles = Get-ChildItem -Path $Dir -Filter '*.cpp' -ErrorAction SilentlyContinue
+            return ((Test-Path "$Dir/Makefile") -and [bool]($cFiles -or $cppFiles))
+        }
+        'has_tests' {
+            return ((Test-Path "$Dir/test") -or (Test-Path "$Dir/tests") -or
+                    ($null -ne (Get-ChildItem -Path $Dir -Recurse -Include '*_test.c','*_test.cpp' -ErrorAction SilentlyContinue | Select-Object -First 1)))
+        }
+        'build' {
+            if ((Test-Path "$Dir/CMakeLists.txt") -and (Find-Cmd 'cmake')) {
+                Invoke-GateSeq $Dir 'and' @((New-GateStep 'cmake' @('-B','build','-DCMAKE_BUILD_TYPE=Release')),
+                                            (New-GateStep 'cmake' @('--build','build')))
+                Complete-Gate 'cmake build failed'
+            } elseif ((Test-Path "$Dir/Makefile") -and (Find-Cmd 'make')) {
+                Invoke-GateRun 'make failed' $Dir 'make' @()
+            } else { Set-GateSkip 'toolchain not installed' }
+        }
+        'test' {
+            if (Find-Cmd 'ctest') {
+                Set-GateNoCoverage
+                Invoke-GateRun 'ctest failed' $Dir 'ctest' @('--test-dir','build')
+            } else { Set-GateSkip 'toolchain not installed (ctest not found)' }
+        }
+        'lint' {
+            if (-not (Find-Cmd 'clang-tidy')) { Set-GateSkip 'linter not installed (clang-tidy not found)'; return }
+            $cfiles = @(Get-ChildItem -Path $Dir -Recurse -Depth 3 -File -Include '*.cpp','*.c' -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -notmatch '[\\/]build[\\/]' } | Select-Object -First 100 | ForEach-Object { $_.FullName })
+            if ($cfiles.Count -gt 0) { Invoke-GateRun 'clang-tidy failed' $Dir 'clang-tidy' ($cfiles + '--') }
+            else { Set-GateSkip 'no .c/.cpp source files found' }
+        }
+        'coverage' { Set-GateCoverageUnsupported }
+    }
+}
+
+function Recipe-elixir { param([string]$Req, [string]$Dir)
+    switch ($Req) {
+        'detect'    { return (Test-Path "$Dir/mix.exs") }
+        'has_tests' { return $null -ne (Get-ChildItem -Path $Dir -Recurse -Filter '*_test.exs' -ErrorAction SilentlyContinue | Select-Object -First 1) }
+        'build' {
+            if (Find-Cmd 'mix') { Invoke-GateRun 'mix compile failed' $Dir 'mix' @('compile') }
+            else { Set-GateSkip 'toolchain not installed (mix not found)' }
+        }
+        'test' {
+            if (Find-Cmd 'mix') {
+                Invoke-GateSeq $Dir 'or' @((New-GateStep 'mix' @('test','--only','unit')), (New-GateStep 'mix' @('test')))
+                Complete-Gate 'mix test failed'
+            } else { Set-GateSkip 'toolchain not installed (mix not found)' }
+        }
+        'lint' {
+            if (Find-Cmd 'mix') { Invoke-GateRun 'mix credo failed' $Dir 'mix' @('credo') }
+            else { Set-GateSkip 'toolchain not installed (mix not found)' }
+        }
+        'coverage' {
+            if ($script:Gate.CovContent -match '([\d.]+)% \| Total') { return [double]$Matches[1] }
+        }
+    }
+}
+
+function Recipe-scala { param([string]$Req, [string]$Dir)
+    switch ($Req) {
+        'detect'    { return (Test-Path "$Dir/build.sbt") }
+        'has_tests' { return (Test-Path "$Dir/src/test") }
+        'build' {
+            if (Find-Cmd 'sbt') { Invoke-GateRun 'sbt compile failed' $Dir 'sbt' @('compile') }
+            else { Set-GateSkip 'toolchain not installed (sbt not found)' }
+        }
+        'test' {
+            if (Find-Cmd 'sbt') {
+                Invoke-GateSeq $Dir 'or' @((New-GateStep 'sbt' @('testOnly *Unit*')), (New-GateStep 'sbt' @('test')))
+                Complete-Gate 'sbt test failed'
+            } else { Set-GateSkip 'toolchain not installed (sbt not found)' }
+        }
+        'lint' {
+            if (Find-Cmd 'sbt') { Invoke-GateRun 'scalastyle failed' $Dir 'sbt' @('scalastyle') }
+            else { Set-GateSkip 'toolchain not installed (sbt not found)' }
+        }
+        'coverage' { Set-GateCoverageUnsupported }
+    }
+}
+
 # ---------------------------------------------------------------------------
 # Language detection — file presence only
 # ---------------------------------------------------------------------------
 function Get-Lang { param([string]$Dir)
-    if (Recipe-typescript 'detect' $Dir) { return 'typescript' }
-    if (Recipe-python 'detect' $Dir)     { return 'python' }
-    if (Test-Path "$Dir/build.gradle.kts") { return 'kotlin' }
-    $ktFiles = Get-ChildItem -Path $Dir -Filter '*.kt' -ErrorAction SilentlyContinue
-    if ((Test-Path "$Dir/build.gradle") -and $ktFiles) { return 'kotlin' }
-    if ((Test-Path "$Dir/pom.xml") -or (Test-Path "$Dir/build.gradle")) { return 'java' }
-    if (Test-Path "$Dir/go.mod")           { return 'go' }
-    if (Test-Path "$Dir/Cargo.toml")       { return 'rust' }
-    $csproj = Get-ChildItem -Path $Dir -Filter '*.csproj' -ErrorAction SilentlyContinue
-    $sln    = Get-ChildItem -Path $Dir -Filter '*.sln'    -ErrorAction SilentlyContinue
-    if ($csproj -or $sln -or (Test-Path "$Dir/global.json")) { return 'dotnet' }
-    if (Test-Path "$Dir/Gemfile")          { return 'ruby' }
-    if (Test-Path "$Dir/composer.json")    { return 'php' }
-    if ((Test-Path "$Dir/Package.swift") -or
-        (Get-ChildItem -Path $Dir -Filter '*.xcodeproj' -ErrorAction SilentlyContinue)) { return 'swift' }
-    if (Test-Path "$Dir/CMakeLists.txt")   { return 'cpp' }
-    $cFiles = Get-ChildItem -Path $Dir -Filter '*.c'   -ErrorAction SilentlyContinue
-    $cppFiles = Get-ChildItem -Path $Dir -Filter '*.cpp' -ErrorAction SilentlyContinue
-    if ((Test-Path "$Dir/Makefile") -and ($cFiles -or $cppFiles)) { return 'cpp' }
-    if (Test-Path "$Dir/mix.exs")          { return 'elixir' }
-    if (Test-Path "$Dir/build.sbt")        { return 'scala' }
+    # Detection order matters: the first Language whose signal is present wins.
+    foreach ($l in 'typescript','python','kotlin','java','go','rust','dotnet','ruby','php','swift','cpp','elixir','scala') {
+        if (& "Recipe-$l" 'detect' $Dir) { return $l }
+    }
     return $null
 }
 
@@ -348,7 +651,7 @@ $GateResults = @{}  # key: "proj|lang|gate" → Gate Result record ([pscustomobj
 function Set-GateResult {
     param([string]$Proj, [string]$Lang, [string]$Gate, [string]$Status,
           [string]$Reason = '', [object]$ExitCode = $null, [double]$Duration = 0,
-          [string]$LogFile = $null, [object]$LineCovPct = $null,
+          [object]$LogFile = $null, [object]$LineCovPct = $null,
           [object]$Threshold = $null)
     # One immutable-by-convention Gate Result, written once; read only by
     # Write-ValidationReport and the summary table.
@@ -372,7 +675,7 @@ function Invoke-Tool {
     }
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName               = $Exe
-    $psi.Arguments              = $ArgumentList -join ' '
+    $psi.Arguments              = ($ArgumentList | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' '
     $psi.WorkingDirectory       = $WorkingDir
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError  = $true
@@ -415,160 +718,8 @@ function Test-PythonModule { param([string]$Py, [string[]]$ModuleArgs)
 }
 
 # ---------------------------------------------------------------------------
-# Test file detection
+# Coverage Gate (parses the output captured by the test Gate — no re-run)
 # ---------------------------------------------------------------------------
-function Test-HasTestFiles { param([string]$Dir, [string]$Lang)
-    switch ($Lang) {
-        { $_ -in 'java','kotlin' } { return Test-Path "$Dir/src/test" }
-        'go'      { return $null -ne (Get-ChildItem -Path $Dir -Recurse -Filter '*_test.go' -ErrorAction SilentlyContinue | Select-Object -First 1) }
-        'rust'    { return (Test-Path "$Dir/tests") -or ($null -ne (Select-String -Path "$Dir/src/*.rs" -Pattern '\[cfg\(test\)\]' -ErrorAction SilentlyContinue | Select-Object -First 1)) }
-        'dotnet'  { return $null -ne (Get-ChildItem -Path $Dir -Recurse -Include '*Tests.cs','*Test.cs' -ErrorAction SilentlyContinue | Select-Object -First 1) }
-        'ruby'    { return $null -ne (Get-ChildItem -Path $Dir -Recurse -Include '*_spec.rb','*_test.rb' -ErrorAction SilentlyContinue | Select-Object -First 1) }
-        'php'     { return $null -ne (Get-ChildItem -Path $Dir -Recurse -Filter '*Test.php' -ErrorAction SilentlyContinue | Select-Object -First 1) }
-        'swift'   { return $null -ne (Get-ChildItem -Path $Dir -Recurse -Filter '*Tests.swift' -ErrorAction SilentlyContinue | Select-Object -First 1) }
-        'cpp'     { return (Test-Path "$Dir/test") -or (Test-Path "$Dir/tests") -or ($null -ne (Get-ChildItem -Path $Dir -Recurse -Include '*_test.c','*_test.cpp' -ErrorAction SilentlyContinue | Select-Object -First 1)) }
-        'elixir'  { return $null -ne (Get-ChildItem -Path $Dir -Recurse -Filter '*_test.exs' -ErrorAction SilentlyContinue | Select-Object -First 1) }
-        'scala'   { return Test-Path "$Dir/src/test" }
-        default   { return $false }
-    }
-}
-
-# ---------------------------------------------------------------------------
-# Gate runners
-# ---------------------------------------------------------------------------
-function Invoke-BuildGate { param($P)
-    if (Test-IsRecipe $P.Lang) { Invoke-Gate 'build' $P; return }
-    $pd = $P.Dir; $abs = $P.AbsDir; $lang = $P.Lang
-    Write-GateLine $pd $lang 'build' 'RUNNING'
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $st = 'SKIPPED'; $rs = 'no build command applies'; $ex = $null; $lf = $null
-
-    switch ($lang) {
-        'go' {
-            if (Find-Cmd 'go') {
-                $r = Invoke-Tool $abs @('build','./...') 'go'
-                if ($r.ExitCode -eq 0) { $st='PASS'; $rs=''; $ex=0 }
-                else { $st='FAIL'; $ex=$r.ExitCode; $rs='go build failed'; $lf=Save-Sidecar $pd $lang 'build' $r.Output }
-            } else { $st='SKIPPED'; $rs='toolchain not installed (go not found)' }
-        }
-        'rust' {
-            if (Find-Cmd 'cargo') {
-                $r = Invoke-Tool $abs @('build') 'cargo'
-                if ($r.ExitCode -eq 0) { $st='PASS'; $rs=''; $ex=0 }
-                else { $st='FAIL'; $ex=$r.ExitCode; $rs='cargo build failed'; $lf=Save-Sidecar $pd $lang 'build' $r.Output }
-            } else { $st='SKIPPED'; $rs='toolchain not installed (cargo not found)' }
-        }
-        'dotnet' {
-            if (Find-Cmd 'dotnet') {
-                $r1 = Invoke-Tool $abs @('restore') 'dotnet'
-                if ($r1.ExitCode -ne 0) {
-                    $st='FAIL'; $ex=$r1.ExitCode; $rs='dotnet restore failed'; $lf=Save-Sidecar $pd $lang 'build' $r1.Output
-                } else {
-                    $r = Invoke-Tool $abs @('build') 'dotnet'
-                    if ($r.ExitCode -eq 0) { $st='PASS'; $rs=''; $ex=0 }
-                    else { $st='FAIL'; $ex=$r.ExitCode; $rs='dotnet build failed'; $lf=Save-Sidecar $pd $lang 'build' $r.Output }
-                }
-            } else { $st='SKIPPED'; $rs='toolchain not installed (dotnet not found)' }
-        }
-        default { $st='SKIPPED'; $rs='build not implemented for this language' }
-    }
-
-    $sw.Stop()
-    Write-GateLine $pd $lang 'build' $st "($([Math]::Round($sw.Elapsed.TotalSeconds,1))s)"
-    Set-GateResult $pd $lang 'build' $st $rs $ex $sw.Elapsed.TotalSeconds $lf
-}
-
-function Invoke-TestGate { param($P)
-    if (Test-IsRecipe $P.Lang) { Invoke-Gate 'test' $P; return }
-    $pd = $P.Dir; $abs = $P.AbsDir; $lang = $P.Lang
-    Write-GateLine $pd $lang 'test' 'RUNNING'
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $st = 'SKIPPED'; $rs = ''; $ex = $null; $lf = $null; $covOutput = $null
-
-    # Hard FAIL if no test files
-    if (-not (Test-HasTestFiles $abs $lang)) {
-        $st = 'FAIL'; $ex = 1
-        $rs = 'No test files detected — a project must have tests to be reviewable'
-        $lf = Save-Sidecar $pd $lang 'test' $rs
-        $sw.Stop()
-        Write-GateLine $pd $lang 'test' $st $rs
-        Set-GateResult $pd $lang 'test' $st $rs $ex $sw.Elapsed.TotalSeconds $lf
-        return
-    }
-
-    switch ($lang) {
-        'go' {
-            if (-not (Find-Cmd 'go')) { $st='SKIPPED'; $rs='toolchain not installed'; break }
-            $covOut = Join-Path $WorkDir 'go_coverage.out'
-            $r = Invoke-Tool $abs @('test','-short',"-coverprofile=$covOut",'./...') 'go'
-            if ($r.ExitCode -eq 0) {
-                $r2 = Invoke-Tool $abs @('tool','cover',"-func=$covOut") 'go'
-                $covOutput = $r.Output + $r2.Output
-                $st='PASS'; $rs=''; $ex=0
-            } else { $st='FAIL'; $ex=$r.ExitCode; $rs='go test failed'; $lf=Save-Sidecar $pd $lang 'test' $r.Output }
-        }
-        'rust' {
-            if (-not (Find-Cmd 'cargo')) { $st='SKIPPED'; $rs='toolchain not installed'; break }
-            $r = Invoke-Tool $abs @('test','--lib') 'cargo'
-            $covOutput = $r.Output
-            if ($r.ExitCode -eq 0) { $st='PASS'; $rs=''; $ex=0 }
-            else { $st='FAIL'; $ex=$r.ExitCode; $rs='cargo test failed'; $lf=Save-Sidecar $pd $lang 'test' $r.Output }
-        }
-        default { $st='SKIPPED'; $rs='test not implemented for this language' }
-    }
-
-    # Store coverage output for Gate 4
-    if ($covOutput) {
-        $covFile = Join-Path $WorkDir "COV_${pd}_${lang}.txt"
-        Set-Content -Path $covFile -Value $covOutput -Encoding UTF8
-    }
-
-    $sw.Stop()
-    Write-GateLine $pd $lang 'test' $st "($([Math]::Round($sw.Elapsed.TotalSeconds,1))s)"
-    Set-GateResult $pd $lang 'test' $st $rs $ex $sw.Elapsed.TotalSeconds $lf
-}
-
-function Invoke-LintGate { param($P)
-    if (Test-IsRecipe $P.Lang) { Invoke-Gate 'lint' $P; return }
-    $pd = $P.Dir; $abs = $P.AbsDir; $lang = $P.Lang
-    Write-GateLine $pd $lang 'lint' 'RUNNING'
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $st = 'SKIPPED'; $rs = ''; $ex = $null; $lf = $null
-
-    switch ($lang) {
-        'go' {
-            if (-not (Find-Cmd 'go')) { $st='SKIPPED'; $rs='toolchain not installed'; break }
-            $linter = if (Find-Cmd 'golangci-lint') { 'golangci-lint' } else { $null }
-            if ($linter) {
-                $r = Invoke-Tool $abs @('run') $linter
-            } else {
-                $r = Invoke-Tool $abs @('vet','./...') 'go'
-            }
-            if ($r.ExitCode -eq 0) { $st='PASS'; $ex=0 }
-            else { $st='FAIL'; $ex=$r.ExitCode; $rs='lint failed'; $lf=Save-Sidecar $pd $lang 'lint' $r.Output }
-        }
-        'rust' {
-            if (Find-Cmd 'cargo') {
-                $r = Invoke-Tool $abs @('clippy','--','-D','warnings') 'cargo'
-                if ($r.ExitCode -eq 0) { $st='PASS'; $ex=0 }
-                else { $st='FAIL'; $ex=$r.ExitCode; $rs='clippy failed'; $lf=Save-Sidecar $pd $lang 'lint' $r.Output }
-            } else { $st='SKIPPED'; $rs='toolchain not installed' }
-        }
-        'dotnet' {
-            if (Find-Cmd 'dotnet') {
-                $r = Invoke-Tool $abs @('format','--verify-no-changes') 'dotnet'
-                if ($r.ExitCode -eq 0) { $st='PASS'; $ex=0 }
-                else { $st='FAIL'; $ex=$r.ExitCode; $rs='dotnet format failed'; $lf=Save-Sidecar $pd $lang 'lint' $r.Output }
-            } else { $st='SKIPPED'; $rs='toolchain not installed' }
-        }
-        default { $st='SKIPPED'; $rs='lint not implemented for this language' }
-    }
-
-    $sw.Stop()
-    Write-GateLine $pd $lang 'lint' $st "($([Math]::Round($sw.Elapsed.TotalSeconds,1))s)"
-    Set-GateResult $pd $lang 'lint' $st $rs $ex $sw.Elapsed.TotalSeconds $lf
-}
-
 function Invoke-CoverageGate { param($P)
     $pd = $P.Dir; $abs = $P.AbsDir; $lang = $P.Lang
     Write-GateLine $pd $lang 'coverage' 'RUNNING'
@@ -593,28 +744,15 @@ function Invoke-CoverageGate { param($P)
 
     $covContent = Get-Content $covFile -Raw
 
-    # Parse line coverage
+    # Parse line coverage with the Language Recipe
+    New-GateState
     $script:Gate.CovContent = $covContent
-    switch ($lang) {
-        { Test-IsRecipe $_ } { $lpct = & "Recipe-$lang" 'coverage' $abs }
-        'go' {
-            if ($covContent -match 'total:\s+\(statements\)\s+([\d.]+)%') {
-                $lpct = [double]$Matches[1]
-            }
-        }
-        'rust' {
-            if ($covContent -match 'TOTAL\s+.*\s+([\d.]+)%') { $lpct = [double]$Matches[1] }
-            elseif ($covContent -match '([\d.]+)% coverage') { $lpct = [double]$Matches[1] }
-        }
-        'php' {
-            if ($covContent -match 'Lines:\s+([\d.]+)%') { $lpct = [double]$Matches[1] }
-        }
-        default {
-            $st='SKIPPED'; $rs="coverage parsing not implemented for $lang"
-            $sw.Stop(); Write-GateLine $pd $lang 'coverage' $st $rs
-            Set-GateResult $pd $lang 'coverage' $st $rs $null $sw.Elapsed.TotalSeconds $null $null $thr
-            return
-        }
+    $lpct = & "Recipe-$lang" 'coverage' $abs
+    if ($script:Gate.CovUnsupported) {
+        $st='SKIPPED'; $rs="coverage parsing not implemented for $lang"
+        $sw.Stop(); Write-GateLine $pd $lang 'coverage' $st $rs
+        Set-GateResult $pd $lang 'coverage' $st $rs $null $sw.Elapsed.TotalSeconds $null $null $thr
+        return
     }
 
     if ($null -eq $lpct) {
@@ -640,9 +778,9 @@ function Invoke-CoverageGate { param($P)
 # ---------------------------------------------------------------------------
 foreach ($proj in $Projects) {
     Write-Host "── [$($proj.Dir) / $($proj.Lang)] ──────────────────────────────────"
-    Invoke-BuildGate $proj
-    Invoke-TestGate  $proj
-    Invoke-LintGate  $proj
+    Invoke-Gate 'build' $proj
+    Invoke-Gate 'test'  $proj
+    Invoke-Gate 'lint'  $proj
     Invoke-CoverageGate $proj
     Write-Host ''
 }

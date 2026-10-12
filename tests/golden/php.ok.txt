@@ -7,4 +7,4 @@ gates:
 build PASS exit=0 reason=null log=null line_pct= threshold=
 test PASS exit=0 reason=null log=null line_pct= threshold=
 lint PASS exit=0 reason=null log=null line_pct= threshold=
-coverage PASS exit=null reason=null log=null line_pct=91.00 threshold=80
+coverage PASS exit=null reason=null log=null line_pct=91 threshold=80

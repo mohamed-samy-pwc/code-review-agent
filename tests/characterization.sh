@@ -111,8 +111,11 @@ _char_make_project() { # <lang> <dir> <local yes|no>
 
 # Reduce validation-report.json to one stable line per Gate (no durations/paths).
 _char_gate_lines() { # <report>
-  grep -o '"\(build\|test\|lint\|coverage\)": {"status": "[A-Z]*"[^}]*}' "$1" | \
-    sed -E 's/^"([a-z]+)": \{"status": "([A-Z]+)", "duration_seconds": [0-9]+, "exit_code": ([^,]+), "reason": (.*), "log_file": ([^,}]*)(, "line_coverage_pct": ([^,]+), [^}]*"threshold_pct": ([0-9.]+))?.*/\1 \2 exit=\3 reason=\4 log=\5 line_pct=\7 threshold=\8/'
+  # Flatten first: validate.ps1 pretty-prints its JSON over many lines.
+  tr -d '\r\n' < "$1" | sed -e 's/  */ /g' -e 's/{ /{/g' -e 's/ }/}/g' | \
+    grep -o '"\(build\|test\|lint\|coverage\)": {"status": "[A-Z]*"[^}]*}' | \
+    sed -E 's/^"([a-z]+)": \{"status": "([A-Z]+)", "duration_seconds": [0-9.]+, "exit_code": ([^,]+), "reason": (.*), "log_file": ([^,}]*)(, "line_coverage_pct": ([^,]+), [^}]*"threshold_pct": ([0-9.]+))?.*/\1 \2 exit=\3 reason=\4 log=\5 line_pct=\7 threshold=\8/' | \
+    sed -E -e 's/(line_pct=[0-9]+)\.0+ /\1 /' -e 's/(line_pct=[0-9]+\.[0-9]*[1-9])0+ /\1 /'
 }
 
 # Run one Language in one scenario; print the observed behaviour on stdout.
@@ -139,7 +142,7 @@ _char_observe() { # <lang> <scenario> <script command...>
 
   printf 'exit %s\n' "$_exit"
   printf 'calls:\n'
-  sed -e "s|$_fix|<DIR>|g" -e 's|[^ =]*/cov\.out|<WORK>/cov.out|g' "$STUB_LOG"
+  sed -e "s|/private$_fix|<DIR>|g" -e "s|$_fix|<DIR>|g" -e 's|[^ =]*/cov\.out|<WORK>/cov.out|g' "$STUB_LOG"
   printf 'gates:\n'
   if [ -f "$_fix/validation-report.json" ]; then _char_gate_lines "$_fix/validation-report.json"
   else printf '(no report)\n'; fi
@@ -160,7 +163,7 @@ run_characterization() { # <label> <script command...>
       _gold="$GOLDEN_DIR/$_l.$_s.txt"
       _got="$CHAR_ROOT/$_l.$_s.observed"
       _char_observe "$_l" "$_s" "$@" > "$_got"
-      if [ -n "${UPDATE_GOLDEN:-}" ]; then
+      if [ -n "${UPDATE_GOLDEN:-}" ] && [ "$_label" = "validate.sh" ]; then
         cp "$_got" "$_gold"
         pending "$_l/$_s golden file written"
       elif [ ! -f "$_gold" ]; then

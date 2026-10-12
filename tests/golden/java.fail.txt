@@ -7,4 +7,4 @@ gates:
 build FAIL exit=1 reason="mvnw failed" log="validation-logs/root-java-build.log" line_pct= threshold=
 test FAIL exit=1 reason="test failed" log="validation-logs/root-java-test.log" line_pct= threshold=
 lint FAIL exit=1 reason="checkstyle failed" log="validation-logs/root-java-lint.log" line_pct= threshold=
-coverage PASS exit=null reason=null log=null line_pct=90.0 threshold=80
+coverage PASS exit=null reason=null log=null line_pct=90 threshold=80

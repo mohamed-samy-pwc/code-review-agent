@@ -7,4 +7,4 @@ gates:
 build FAIL exit=1 reason="composer install failed" log="validation-logs/root-php-build.log" line_pct= threshold=
 test FAIL exit=1 reason="phpunit failed" log="validation-logs/root-php-test.log" line_pct= threshold=
 lint FAIL exit=1 reason="phpstan failed" log="validation-logs/root-php-lint.log" line_pct= threshold=
-coverage PASS exit=null reason=null log=null line_pct=91.00 threshold=80
+coverage PASS exit=null reason=null log=null line_pct=91 threshold=80

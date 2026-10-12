@@ -8,4 +8,4 @@ gates:
 build FAIL exit=1 reason="mix compile failed" log="validation-logs/root-elixir-build.log" line_pct= threshold=
 test FAIL exit=1 reason="mix test failed" log="validation-logs/root-elixir-test.log" line_pct= threshold=
 lint FAIL exit=1 reason="mix credo failed" log="validation-logs/root-elixir-lint.log" line_pct= threshold=
-coverage PASS exit=null reason=null log=null line_pct=88.00 threshold=80
+coverage PASS exit=null reason=null log=null line_pct=88 threshold=80

@@ -8,7 +8,7 @@ Parent spec: GitHub issue #7 (Spec: Language Recipes, gate runner and Gate Resul
 
 **Status:** ready-for-agent
 
-- [ ] Every Language in `validate.ps1` runs through the runner.
-- [ ] The ticket 01 tests run against both scripts and pass; they report PENDING, not FAIL, when pwsh is absent.
-- [ ] Parity group passes.
-- [ ] Full harness passes with pwsh installed.
+- [x] Every Language in `validate.ps1` runs through the runner.
+- [x] The ticket 01 tests run against both scripts and pass; they report PENDING, not FAIL, when pwsh is absent.
+- [x] Parity group passes.
+- [x] Full harness passes with pwsh installed.

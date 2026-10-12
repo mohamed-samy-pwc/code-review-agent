@@ -8,7 +8,7 @@ Parent spec: GitHub issue #7 (Spec: Language Recipes, gate runner and Gate Resul
 
 **Status:** ready-for-agent
 
-- [ ] Gate Results are `[pscustomobject]` records created once and read only by the report writer and the summary table.
-- [ ] `validation-report.json` from `validate.ps1` is identical to before for every fixture.
-- [ ] The strict sh-versus-ps1 parity group passes.
-- [ ] Full harness passes with pwsh installed.
+- [x] Gate Results are `[pscustomobject]` records created once and read only by the report writer and the summary table.
+- [x] `validation-report.json` from `validate.ps1` is identical to before for every fixture.
+- [x] The strict sh-versus-ps1 parity group passes.
+- [x] Full harness passes with pwsh installed.

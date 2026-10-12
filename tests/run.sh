@@ -429,6 +429,13 @@ printf '\n'
 . "$REPO_ROOT/tests/characterization.sh"
 run_characterization "validate.sh" sh "$VALIDATE_SH"
 
+# The same goldens must hold for validate.ps1 (PENDING when pwsh is absent).
+if command -v pwsh >/dev/null 2>&1; then
+  run_characterization "validate.ps1" "$(command -v pwsh)" -NoProfile -File "$REPO_ROOT/validate.ps1"
+else
+  pending "validate.ps1 characterization (pwsh not installed)"
+fi
+
 # ==========================================================================
 # SUMMARY
 # ==========================================================================
