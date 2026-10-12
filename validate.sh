@@ -115,15 +115,201 @@ printf '╚═══════════════════════
 printf 'Scanning: %s\n' "$INVOCATION_DIR"
 
 # ---------------------------------------------------------------------------
+# Language Recipes — one function per Language, called as
+#   _recipe_<lang> <request> <project dir>
+# Requests: detect, has_tests, build, test, lint, coverage.
+# A recipe never writes files, never times itself and never prints status
+# lines; it reports a Gate outcome through gate_run / gate_skip / gate_pass
+# (or gate_exec + gate_finish when a Gate runs more than one command).
+# `coverage` prints the line-coverage percentage (nothing if unparseable).
+# ---------------------------------------------------------------------------
+RECIPE_LANGS="typescript python"
+_is_recipe() { case " $RECIPE_LANGS " in *" $1 "*) return 0 ;; esac; return 1; }
+
+_recipe_typescript() {
+  _req="$1"; _d="$2"
+  case "$_req" in
+    detect) [ -f "$_d/package.json" ] ;;
+    has_tests)
+      find "$_d" -not -path '*/node_modules/*' \
+        \( -name '*.test.js' -o -name '*.test.ts' -o -name '*.test.jsx' \
+           -o -name '*.test.tsx' -o -name '*.spec.js' -o -name '*.spec.ts' \
+           -o -name '*.spec.jsx' -o -name '*.spec.tsx' \) 2>/dev/null | grep -q . ;;
+    build)
+      if ! command -v npm >/dev/null 2>&1; then
+        gate_skip "toolchain not installed (npm not found)"
+      elif grep -q '"build"' "$_d/package.json" 2>/dev/null; then
+        gate_run "npm run build failed (exit {exit})" "(cd '$_d' && npm run build)"
+      elif [ -f "$_d/node_modules/.bin/tsc" ]; then
+        gate_run "tsc failed (exit {exit})" "(cd '$_d' && ./node_modules/.bin/tsc --noEmit)"
+      else
+        gate_skip "no build script and tsc not found"
+      fi ;;
+    test)
+      if ! command -v npm >/dev/null 2>&1; then
+        gate_skip "toolchain not installed (npm not found)"
+      else
+        # Run with unit pattern; if no tests match, retry without pattern
+        gate_exec "(cd '$_d' && npm test -- --coverage --coverageReporters=text \
+          --testPathPattern='(unit|spec)' --forceExit)"
+        if gate_output_matches 'Your test suite must contain at least one test|No tests found'; then
+          gate_exec "(cd '$_d' && npm test -- --coverage --coverageReporters=text \
+            --forceExit)"
+        fi
+        gate_finish "npm test failed (exit {exit})"
+      fi ;;
+    lint)
+      # Check for ESLint config before invoking — prevents false FAIL from missing config error
+      _has_eslint_conf=false
+      for _cf in eslint.config.js eslint.config.mjs eslint.config.cjs \
+                 .eslintrc.js .eslintrc.cjs .eslintrc.yaml .eslintrc.yml .eslintrc.json; do
+        [ -f "$_d/$_cf" ] && _has_eslint_conf=true && break
+      done
+      if [ "$_has_eslint_conf" = "false" ] && \
+         grep -q '"eslintConfig"' "$_d/package.json" 2>/dev/null; then
+        _has_eslint_conf=true
+      fi
+      if [ "$_has_eslint_conf" = "false" ]; then
+        gate_skip "no ESLint config found"
+      elif [ -f "$_d/node_modules/.bin/eslint" ]; then
+        gate_run "eslint failed (exit {exit})" "(cd '$_d' && ./node_modules/.bin/eslint .)"
+      else
+        gate_skip "linter not installed (eslint not in node_modules/.bin)"
+      fi ;;
+    coverage)
+      # Istanbul/c8 table row: All files | stmts | branch | func | lines |
+      _lpct=$(grep 'All files' "$GATE_COVFILE" 2>/dev/null | \
+        sed 's/|/ /g' | awk '{for(i=1;i<=NF;i++) if($i+0>0 || $i=="0") print $i}' | \
+        tail -1 | sed 's/[^0-9.]//g')
+      # Simpler fallback: 5th pipe-delimited field
+      if [ -z "$_lpct" ] || [ "$_lpct" = "0" ]; then
+        _lpct=$(grep 'All files' "$GATE_COVFILE" 2>/dev/null | \
+          awk -F'|' '{gsub(/ /,"",$5); print $5+0}')
+      fi
+      printf '%s' "$_lpct" ;;
+  esac
+}
+
+_recipe_python() {
+  _req="$1"; _d="$2"
+  _py=$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)
+  case "$_req" in
+    detect)
+      [ -f "$_d/pyproject.toml" ] || [ -f "$_d/setup.py" ] || \
+        [ -f "$_d/setup.cfg" ] || [ -f "$_d/requirements.txt" ] ;;
+    has_tests) find "$_d" \( -name 'test_*.py' -o -name '*_test.py' \) 2>/dev/null | grep -q . ;;
+    build)
+      if [ -n "$_py" ] && "$_py" -c "import build" >/dev/null 2>&1; then
+        gate_run "python build failed" "(cd '$_d' && '$_py' -m build)"
+      elif command -v poetry >/dev/null 2>&1; then
+        gate_run "poetry build failed" "(cd '$_d' && poetry build)"
+      else
+        gate_skip "no build tool detected"
+      fi ;;
+    test)
+      if [ -z "$_py" ]; then
+        gate_skip "toolchain not installed (python not found)"
+      else
+        gate_exec "(cd '$_d' && '$_py' -m pytest -m unit --cov=src --cov-report=term-missing -q)"
+        if [ "$GATE_EXIT" = "5" ]; then
+          gate_exec "(cd '$_d' && '$_py' -m pytest --cov=src --cov-report=term-missing -q)"
+        fi
+        gate_finish "pytest failed (exit {exit})"
+      fi ;;
+    lint)
+      # Prefer ruff; fall back to python3 -m ruff, then flake8, then pylint
+      if command -v ruff >/dev/null 2>&1; then
+        gate_run "ruff failed" "(cd '$_d' && ruff check .)"
+      elif [ -n "$_py" ] && "$_py" -m ruff --version >/dev/null 2>&1; then
+        gate_run "ruff failed" "(cd '$_d' && '$_py' -m ruff check .)"
+      elif command -v flake8 >/dev/null 2>&1; then
+        gate_run "flake8 failed" "(cd '$_d' && flake8 .)"
+      elif [ -n "$_py" ] && "$_py" -m flake8 --version >/dev/null 2>&1; then
+        gate_run "flake8 failed" "(cd '$_d' && '$_py' -m flake8 .)"
+      elif command -v pylint >/dev/null 2>&1; then
+        gate_run "pylint failed" "(cd '$_d' && pylint src/)"
+      else
+        gate_skip "linter not installed (ruff/flake8/pylint not found)"
+      fi ;;
+    coverage)
+      # TOTAL    142    12    92%   → last field, strip %
+      grep '^TOTAL' "$GATE_COVFILE" 2>/dev/null | awk '{print $NF}' | sed 's/%//' | head -1 ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# Gate runner — owns timing, status classification, Sidecar Log writing,
+# dry-run and verbose handling, and the Hard Gate rule that a Project with no
+# test files fails its test Gate (ADR-0001).
+# ---------------------------------------------------------------------------
+
+# Outcome helpers a recipe calls.
+gate_pass() { GATE_ST=PASS; GATE_RS=""; GATE_EX=0; }
+gate_skip() { GATE_ST=SKIPPED; GATE_RS="$1"; GATE_EX=null; }
+
+# Run one command (dry-run prints it instead). Leaves its exit code in
+# $GATE_EXIT and its output in $WORK/out.
+gate_exec() {
+  GATE_RAN=true
+  if [ "$DRY_RUN" = "true" ]; then printf '[DRY RUN] %s\n' "$*"; GATE_EXIT=0; return 0; fi
+  if $VERBOSE; then eval "$*" 2>&1 | tee "$WORK/out"; GATE_EXIT="${PIPESTATUS:-$?}"
+  else eval "$*" > "$WORK/out" 2>&1; GATE_EXIT=$?; fi
+}
+
+gate_output_matches() { grep -qE "$1" "$WORK/out" 2>/dev/null; }
+
+# Classify the last gate_exec: PASS on exit 0, otherwise FAIL with the given
+# reason ({exit} is replaced by the exit code) and a Sidecar Log.
+gate_finish() {
+  if [ "$GATE_EXIT" = "0" ]; then gate_pass; return; fi
+  _gr="$1"
+  case "$_gr" in *'{exit}'*) _gr="${_gr%%'{exit}'*}${GATE_EXIT}${_gr#*'{exit}'}" ;; esac
+  GATE_ST=FAIL; GATE_RS="$_gr"; GATE_EX=$GATE_EXIT
+  GATE_LOG=$(_save_sidecar "$_pd" "$_lang" "$_gate")
+}
+
+gate_run() { gate_exec "$2"; gate_finish "$1"; }
+
+_run_gate() {
+  _gate="$1"; _pd="$2"; _abs="$3"; _lang="$4"
+  GATE_ST=SKIPPED; GATE_RS=""; GATE_EX=null; GATE_LOG=null; GATE_RAN=false
+  [ "$_gate" = "build" ] && GATE_RS="no build command applies"
+  _t0=$(date +%s)
+  _status_line "$_pd" "$_lang" "$_gate" "RUNNING"
+
+  if [ "$_gate" = "test" ] && ! "_recipe_$_lang" has_tests "$_abs"; then
+    GATE_ST=FAIL; GATE_EX=1
+    GATE_RS="No test files detected — a project must have tests to be reviewable"
+    printf '%s\n' "$GATE_RS" > "$WORK/out"
+    GATE_LOG=$(_save_sidecar "$_pd" "$_lang" "$_gate")
+    _t1=$(date +%s); _dur=$((_t1 - _t0))
+    _status_line "$_pd" "$_lang" "$_gate" "$GATE_ST" "$GATE_RS"
+    _write_state "$_gate" "$GATE_ST" "$GATE_RS" "$GATE_EX" "$_dur" "$GATE_LOG"
+    return
+  fi
+
+  "_recipe_$_lang" "$_gate" "$_abs"
+
+  # Coverage is parsed later from the test Gate's captured output.
+  if [ "$_gate" = "test" ] && [ "$GATE_RAN" = "true" ] && [ "$DRY_RUN" != "true" ]; then
+    cp "$WORK/out" "$WORK/COV_${_pi}" 2>/dev/null || true
+  fi
+
+  _t1=$(date +%s); _dur=$((_t1 - _t0))
+  _status_line "$_pd" "$_lang" "$_gate" "$GATE_ST" "(${_dur}s)"
+  _write_state "$_gate" "$GATE_ST" "$GATE_RS" "$GATE_EX" "$_dur" "$GATE_LOG"
+}
+
+# ---------------------------------------------------------------------------
 # Language detection — file presence only, no content reads
 # Writes detected projects to $WORK/projects: one "reldir|lang" per line
 # ---------------------------------------------------------------------------
 _detect_lang() {
   _d="$1"
-  [ -f "$_d/package.json" ]   && printf 'typescript' && return
-  { [ -f "$_d/pyproject.toml" ] || [ -f "$_d/setup.py" ] || \
-    [ -f "$_d/setup.cfg" ]    || [ -f "$_d/requirements.txt" ]; } \
-    && printf 'python' && return
+  # Language Recipes first, in detection order, then the not-yet-migrated Languages.
+  for _rl in $RECIPE_LANGS; do
+    "_recipe_$_rl" detect "$_d" && printf '%s' "$_rl" && return
+  done
   [ -f "$_d/build.gradle.kts" ] && printf 'kotlin' && return
   { [ -f "$_d/build.gradle" ] && ls "$_d"/*.kt >/dev/null 2>&1; } \
     && printf 'kotlin' && return
@@ -225,12 +411,6 @@ _status_line() {
 _has_tests() {
   _d="$1"; _l="$2"
   case "$_l" in
-    typescript)
-      find "$_d" -not -path '*/node_modules/*' \
-        \( -name '*.test.js' -o -name '*.test.ts' -o -name '*.test.jsx' \
-           -o -name '*.test.tsx' -o -name '*.spec.js' -o -name '*.spec.ts' \
-           -o -name '*.spec.jsx' -o -name '*.spec.tsx' \) 2>/dev/null | grep -q . ;;
-    python) find "$_d" \( -name 'test_*.py' -o -name '*_test.py' \) 2>/dev/null | grep -q . ;;
     java|kotlin) [ -d "$_d/src/test" ] ;;
     go)     find "$_d" -name '*_test.go' 2>/dev/null | grep -q . ;;
     rust)   grep -r '#\[cfg(test)\]' "$_d/src" >/dev/null 2>&1 || [ -d "$_d/tests" ] ;;
@@ -251,6 +431,7 @@ _has_tests() {
 # ---------------------------------------------------------------------------
 _build() {
   _pd="$1"; _abs="$2"; _lang="$3"
+  if _is_recipe "$_lang"; then _run_gate build "$_pd" "$_abs" "$_lang"; return; fi
   _st=SKIPPED; _rs="no build command applies"; _ex=null; _log=null
   _t0=$(date +%s)
   _status_line "$_pd" "$_lang" "build" "RUNNING"
@@ -262,29 +443,6 @@ _build() {
   }
 
   case "$_lang" in
-    typescript)
-      if ! command -v npm >/dev/null 2>&1; then
-        _st=SKIPPED; _rs="toolchain not installed (npm not found)"
-      elif grep -q '"build"' "$_abs/package.json" 2>/dev/null; then
-        _run "(cd '$_abs' && npm run build)" && { _st=PASS; _rs=""; _ex=0; } || \
-          { _ex=$?; _st=FAIL; _rs="npm run build failed (exit $_ex)"; _log=$(_save_sidecar "$_pd" "$_lang" build); }
-      elif [ -f "$_abs/node_modules/.bin/tsc" ]; then
-        _run "(cd '$_abs' && ./node_modules/.bin/tsc --noEmit)" && { _st=PASS; _rs=""; _ex=0; } || \
-          { _ex=$?; _st=FAIL; _rs="tsc failed (exit $_ex)"; _log=$(_save_sidecar "$_pd" "$_lang" build); }
-      else
-        _st=SKIPPED; _rs="no build script and tsc not found"
-      fi ;;
-    python)
-      _py=$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)
-      if [ -n "$_py" ] && "$_py" -c "import build" >/dev/null 2>&1; then
-        _run "(cd '$_abs' && '$_py' -m build)" && { _st=PASS; _rs=""; _ex=0; } || \
-          { _ex=$?; _st=FAIL; _rs="python build failed"; _log=$(_save_sidecar "$_pd" "$_lang" build); }
-      elif command -v poetry >/dev/null 2>&1; then
-        _run "(cd '$_abs' && poetry build)" && { _st=PASS; _rs=""; _ex=0; } || \
-          { _ex=$?; _st=FAIL; _rs="poetry build failed"; _log=$(_save_sidecar "$_pd" "$_lang" build); }
-      else
-        _st=SKIPPED; _rs="no build tool detected"
-      fi ;;
     java)
       if [ -f "$_abs/mvnw" ]; then
         _run "(cd '$_abs' && ./mvnw package -DskipTests)" && { _st=PASS; _rs=""; _ex=0; } || \
@@ -386,6 +544,7 @@ _build() {
 # ---------------------------------------------------------------------------
 _test() {
   _pd="$1"; _abs="$2"; _lang="$3"
+  if _is_recipe "$_lang"; then _run_gate test "$_pd" "$_abs" "$_lang"; return; fi
   _st=SKIPPED; _rs=""; _ex=null; _log=null
   _t0=$(date +%s)
   _status_line "$_pd" "$_lang" "test" "RUNNING"
@@ -411,37 +570,6 @@ _test() {
   }
 
   case "$_lang" in
-    typescript)
-      if ! command -v npm >/dev/null 2>&1; then
-        _st=SKIPPED; _rs="toolchain not installed (npm not found)"
-      else
-        # Run with unit pattern; if no tests match, retry without pattern
-        _run_test "(cd '$_abs' && npm test -- --coverage --coverageReporters=text \
-          --testPathPattern='(unit|spec)' --forceExit)" && _ex=0 || _ex=$?
-        if grep -qE 'Your test suite must contain at least one test|No tests found' \
-             "$WORK/out" 2>/dev/null; then
-          _run_test "(cd '$_abs' && npm test -- --coverage --coverageReporters=text \
-            --forceExit)" && _ex=0 || _ex=$?
-        fi
-        cp "$WORK/out" "$_covfile" 2>/dev/null || true
-        if [ "$_ex" = "0" ]; then _st=PASS; _rs=""
-        else _st=FAIL; _rs="npm test failed (exit $_ex)"; _log=$(_save_sidecar "$_pd" "$_lang" test); fi
-      fi ;;
-    python)
-      _py=$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)
-      if [ -z "$_py" ]; then
-        _st=SKIPPED; _rs="toolchain not installed (python not found)"
-      else
-        _run_test "(cd '$_abs' && '$_py' -m pytest -m unit --cov=src --cov-report=term-missing -q)" \
-          && _ex=0 || _ex=$?
-        if [ "$_ex" = "5" ]; then
-          _run_test "(cd '$_abs' && '$_py' -m pytest --cov=src --cov-report=term-missing -q)" \
-            && _ex=0 || _ex=$?
-        fi
-        cp "$WORK/out" "$_covfile" 2>/dev/null || true
-        if [ "$_ex" = "0" ]; then _st=PASS; _rs=""
-        else _st=FAIL; _rs="pytest failed (exit $_ex)"; _log=$(_save_sidecar "$_pd" "$_lang" test); fi
-      fi ;;
     go)
       if command -v go >/dev/null 2>&1; then
         _run_test "(cd '$_abs' && go test -short -coverprofile='$WORK/cov.out' ./... && \
@@ -550,6 +678,7 @@ _test() {
 # ---------------------------------------------------------------------------
 _lint() {
   _pd="$1"; _abs="$2"; _lang="$3"
+  if _is_recipe "$_lang"; then _run_gate lint "$_pd" "$_abs" "$_lang"; return; fi
   _st=SKIPPED; _rs=""; _ex=null; _log=null
   _t0=$(date +%s)
   _status_line "$_pd" "$_lang" "lint" "RUNNING"
@@ -561,46 +690,6 @@ _lint() {
   }
 
   case "$_lang" in
-    typescript)
-      # Check for ESLint config before invoking — prevents false FAIL from missing config error
-      _has_eslint_conf=false
-      for _cf in eslint.config.js eslint.config.mjs eslint.config.cjs \
-                 .eslintrc.js .eslintrc.cjs .eslintrc.yaml .eslintrc.yml .eslintrc.json; do
-        [ -f "$_abs/$_cf" ] && _has_eslint_conf=true && break
-      done
-      if [ "$_has_eslint_conf" = "false" ] && \
-         grep -q '"eslintConfig"' "$_abs/package.json" 2>/dev/null; then
-        _has_eslint_conf=true
-      fi
-      if [ "$_has_eslint_conf" = "false" ]; then
-        _st=SKIPPED; _rs="no ESLint config found"
-      elif [ -f "$_abs/node_modules/.bin/eslint" ]; then
-        _run_lint "(cd '$_abs' && ./node_modules/.bin/eslint .)" && { _st=PASS; _ex=0; } || \
-          { _ex=$?; _st=FAIL; _rs="eslint failed (exit $_ex)"; _log=$(_save_sidecar "$_pd" "$_lang" lint); }
-      else
-        _st=SKIPPED; _rs="linter not installed (eslint not in node_modules/.bin)"
-      fi ;;
-    python)
-      # Prefer ruff; fall back to python3 -m ruff, then flake8, then pylint
-      _py=$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)
-      if command -v ruff >/dev/null 2>&1; then
-        _run_lint "(cd '$_abs' && ruff check .)" && { _st=PASS; _ex=0; } || \
-          { _ex=$?; _st=FAIL; _rs="ruff failed"; _log=$(_save_sidecar "$_pd" "$_lang" lint); }
-      elif [ -n "$_py" ] && "$_py" -m ruff --version >/dev/null 2>&1; then
-        _run_lint "(cd '$_abs' && '$_py' -m ruff check .)" && { _st=PASS; _ex=0; } || \
-          { _ex=$?; _st=FAIL; _rs="ruff failed"; _log=$(_save_sidecar "$_pd" "$_lang" lint); }
-      elif command -v flake8 >/dev/null 2>&1; then
-        _run_lint "(cd '$_abs' && flake8 .)" && { _st=PASS; _ex=0; } || \
-          { _ex=$?; _st=FAIL; _rs="flake8 failed"; _log=$(_save_sidecar "$_pd" "$_lang" lint); }
-      elif [ -n "$_py" ] && "$_py" -m flake8 --version >/dev/null 2>&1; then
-        _run_lint "(cd '$_abs' && '$_py' -m flake8 .)" && { _st=PASS; _ex=0; } || \
-          { _ex=$?; _st=FAIL; _rs="flake8 failed"; _log=$(_save_sidecar "$_pd" "$_lang" lint); }
-      elif command -v pylint >/dev/null 2>&1; then
-        _run_lint "(cd '$_abs' && pylint src/)" && { _st=PASS; _ex=0; } || \
-          { _ex=$?; _st=FAIL; _rs="pylint failed"; _log=$(_save_sidecar "$_pd" "$_lang" lint); }
-      else
-        _st=SKIPPED; _rs="linter not installed (ruff/flake8/pylint not found)"
-      fi ;;
     java)
       if [ -f "$_abs/mvnw" ]; then
         _run_lint "(cd '$_abs' && ./mvnw checkstyle:check)" && { _st=PASS; _ex=0; } || \
@@ -723,7 +812,7 @@ _coverage() {
     return
   fi
 
-  _covfile="$WORK/COV_${_pi}"
+  _covfile="$WORK/COV_${_pi}"; GATE_COVFILE="$_covfile"
   if [ ! -f "$_covfile" ]; then
     _st=SKIPPED; _rs="no coverage data (test gate skipped or failed)"
     _t1=$(date +%s); _dur=$((_t1 - _t0))
@@ -735,20 +824,8 @@ _coverage() {
 
   # Parse line coverage percentage from the captured output
   case "$_lang" in
-    typescript)
-      # Istanbul/c8 table row: All files | stmts | branch | func | lines |
-      _lpct=$(grep 'All files' "$_covfile" 2>/dev/null | \
-        sed 's/|/ /g' | awk '{for(i=1;i<=NF;i++) if($i+0>0 || $i=="0") print $i}' | \
-        tail -1 | sed 's/[^0-9.]//g')
-      # Simpler fallback: 5th pipe-delimited field
-      if [ -z "$_lpct" ] || [ "$_lpct" = "0" ]; then
-        _lpct=$(grep 'All files' "$_covfile" 2>/dev/null | \
-          awk -F'|' '{gsub(/ /,"",$5); print $5+0}')
-      fi ;;
-    python)
-      # TOTAL    142    12    92%   → last field, strip %
-      _lpct=$(grep '^TOTAL' "$_covfile" 2>/dev/null | \
-        awk '{print $NF}' | sed 's/%//' | head -1) ;;
+    typescript|python)
+      _lpct=$("_recipe_$_lang" coverage "$_abs") ;;
     go)
       # total:  (statements)   77.8%
       _lpct=$(grep '^total:' "$_covfile" 2>/dev/null | \

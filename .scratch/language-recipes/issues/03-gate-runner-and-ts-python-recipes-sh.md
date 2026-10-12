@@ -8,8 +8,8 @@ Parent spec: GitHub issue #7 (Spec: Language Recipes, gate runner and Gate Resul
 
 **Status:** ready-for-agent
 
-- [ ] The runner enforces the no-test-files FAIL for recipe-based Languages with the existing reason text.
-- [ ] Recipes do not write files, time themselves or print status lines.
-- [ ] TypeScript and Python reports and Sidecar Logs are identical to before on all fixtures, including the monorepo.
-- [ ] Detection signals and test-file patterns for these two Languages live in their recipes.
-- [ ] Ticket 01 tests and the full harness pass; Languages not yet migrated are unaffected.
+- [x] The runner enforces the no-test-files FAIL for recipe-based Languages with the existing reason text.
+- [x] Recipes do not write files, time themselves or print status lines.
+- [x] TypeScript and Python reports and Sidecar Logs are identical to before on all fixtures, including the monorepo.
+- [x] Detection signals and test-file patterns for these two Languages live in their recipes.
+- [x] Ticket 01 tests and the full harness pass; Languages not yet migrated are unaffected.
