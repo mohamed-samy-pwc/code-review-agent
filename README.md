@@ -94,6 +94,18 @@ Unit-test scoping follows each ecosystem's convention, for example:
 
 The full table is in the spec.
 
+### Script structure
+
+Both scripts have the same shape (see `CONTEXT.md` for the vocabulary):
+
+1. **Detection** asks each Language Recipe whether its signal files are present, in a fixed order.
+2. **Language Recipes** are one function per Language (`_recipe_<lang>` in `validate.sh`, `Recipe-<lang>` in `validate.ps1`). A recipe answers `detect`, `has_tests`, `build`, `test`, `lint` and `coverage` for one Project. It holds everything specific to that Language: signal files, test-file patterns, the command for each Gate, when to skip and why, and how to read coverage from the test run's output. Recipes never write files, time themselves or print status lines.
+3. **The gate runner** (`_run_gate` / `Invoke-Gate`) runs every Gate. It owns timing, status classification, Sidecar Logs, `--dry-run` and `--verbose`, and the Hard Gate rule that a Project with no test files fails its test Gate. A recipe reports its outcome with `gate_run` (run a command, with a failure reason), `gate_skip` or `gate_pass` (`Invoke-GateRun`, `Set-GateSkip`, `Set-GatePass` in PowerShell).
+4. **Gate Results** hold one record per Gate per Project. They are read only by the report writer and the summary table.
+5. **The report writer** owns the pinned `validation-report.json` schema.
+
+**Adding a Language:** write a `_recipe_<lang>` function in `validate.sh` and a `Recipe-<lang>` function in `validate.ps1` with the same reasons and commands, add the Language to the detection order (`_detect_lang` / `Get-Lang`), add it to `CHAR_LANGS` and `_char_make_project` in `tests/characterization.sh`, then run `UPDATE_GOLDEN=1 ./tests/run.sh` and review the new golden files.
+
 ### 3. Outputs
 
 Everything is written relative to the invocation directory.

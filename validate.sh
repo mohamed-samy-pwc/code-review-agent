@@ -54,6 +54,7 @@ trap 'rm -rf "$WORK"' EXIT
 # Config (.validation.conf INI format)
 # ---------------------------------------------------------------------------
 COVERAGE_THRESHOLD=80
+LANG_THRESHOLDS=''   # space-separated KEY=value pairs from COVERAGE_THRESHOLD_<KEY>
 # Thresholds must be integers 0-100; anything else is a script error (exit 2).
 _check_threshold() {
   case "$2" in
@@ -74,11 +75,10 @@ _read_conf() {
       VERBOSE)              [ "$_v" = "true" ] && VERBOSE=true ;;
       COVERAGE_THRESHOLD_*)
         _check_threshold "$_k" "$_v"
-        # Key suffix is validated here, so the eval below can only assign a number.
         case "${_k#COVERAGE_THRESHOLD_}" in
           *[!A-Za-z0-9_]*|'') printf 'Invalid config key: %s\n' "$_k" >&2; exit 2 ;;
         esac
-        eval "CLANG_THRESH_${_k#COVERAGE_THRESHOLD_}=$_v" ;;
+        LANG_THRESHOLDS="$LANG_THRESHOLDS ${_k#COVERAGE_THRESHOLD_}=$_v" ;;
     esac
   done < ".validation.conf"
 }
@@ -86,7 +86,10 @@ _read_conf
 
 _get_threshold() {
   _U=$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')
-  eval "_t=\${CLANG_THRESH_${_U}:-}"
+  _t=''
+  for _e in $LANG_THRESHOLDS; do
+    case "$_e" in "$_U="*) _t="${_e#*=}" ;; esac
+  done
   [ -n "$_t" ] && printf '%s' "$_t" || printf '%s' "$COVERAGE_THRESHOLD"
 }
 
@@ -120,12 +123,12 @@ printf 'Scanning: %s\n' "$INVOCATION_DIR"
 # Requests: detect, has_tests, build, test, lint, coverage.
 # A recipe never writes files, never times itself and never prints status
 # lines; it reports a Gate outcome through gate_run / gate_skip / gate_pass
-# (or gate_exec + gate_finish when a Gate runs more than one command).
+# (or gate_exec/gate_exec_more + gate_finish when a Gate runs more than one
+# command). Commands are argument lists run in the Project directory — never
+# evaluated as shell text.
 # `coverage` prints the line-coverage percentage (nothing if unparseable).
 # ---------------------------------------------------------------------------
-RECIPE_LANGS="typescript python java kotlin go rust dotnet ruby php swift cpp elixir scala"
 _try_recipe() { "_recipe_$1" detect "$_d" && printf '%s' "$1"; }
-_is_recipe() { case " $RECIPE_LANGS " in *" $1 "*) return 0 ;; esac; return 1; }
 
 _recipe_typescript() {
   _req="$1"; _d="$2"
@@ -140,9 +143,9 @@ _recipe_typescript() {
       if ! command -v npm >/dev/null 2>&1; then
         gate_skip "toolchain not installed (npm not found)"
       elif grep -q '"build"' "$_d/package.json" 2>/dev/null; then
-        gate_run "npm run build failed (exit {exit})" "(cd '$_d' && npm run build)"
+        gate_run "npm run build failed (exit {exit})" "$_d" npm run build
       elif [ -f "$_d/node_modules/.bin/tsc" ]; then
-        gate_run "tsc failed (exit {exit})" "(cd '$_d' && ./node_modules/.bin/tsc --noEmit)"
+        gate_run "tsc failed (exit {exit})" "$_d" ./node_modules/.bin/tsc --noEmit
       else
         gate_skip "no build script and tsc not found"
       fi ;;
@@ -151,11 +154,11 @@ _recipe_typescript() {
         gate_skip "toolchain not installed (npm not found)"
       else
         # Run with unit pattern; if no tests match, retry without pattern
-        gate_exec "(cd '$_d' && npm test -- --coverage --coverageReporters=text \
-          --testPathPattern='(unit|spec)' --forceExit)"
+        gate_exec "$_d" npm test -- --coverage --coverageReporters=text \
+          --testPathPattern='(unit|spec)' --forceExit
         if gate_output_matches 'Your test suite must contain at least one test|No tests found'; then
-          gate_exec "(cd '$_d' && npm test -- --coverage --coverageReporters=text \
-            --forceExit)"
+          gate_exec "$_d" npm test -- --coverage --coverageReporters=text \
+            --forceExit
         fi
         gate_finish "npm test failed (exit {exit})"
       fi ;;
@@ -173,7 +176,7 @@ _recipe_typescript() {
       if [ "$_has_eslint_conf" = "false" ]; then
         gate_skip "no ESLint config found"
       elif [ -f "$_d/node_modules/.bin/eslint" ]; then
-        gate_run "eslint failed (exit {exit})" "(cd '$_d' && ./node_modules/.bin/eslint .)"
+        gate_run "eslint failed (exit {exit})" "$_d" ./node_modules/.bin/eslint .
       else
         gate_skip "linter not installed (eslint not in node_modules/.bin)"
       fi ;;
@@ -201,9 +204,9 @@ _recipe_python() {
     has_tests) find "$_d" \( -name 'test_*.py' -o -name '*_test.py' \) 2>/dev/null | grep -q . ;;
     build)
       if [ -n "$_py" ] && "$_py" -c "import build" >/dev/null 2>&1; then
-        gate_run "python build failed" "(cd '$_d' && '$_py' -m build)"
+        gate_run "python build failed" "$_d" "$_py" -m build
       elif command -v poetry >/dev/null 2>&1; then
-        gate_run "poetry build failed" "(cd '$_d' && poetry build)"
+        gate_run "poetry build failed" "$_d" poetry build
       else
         gate_skip "no build tool detected"
       fi ;;
@@ -211,24 +214,24 @@ _recipe_python() {
       if [ -z "$_py" ]; then
         gate_skip "toolchain not installed (python not found)"
       else
-        gate_exec "(cd '$_d' && '$_py' -m pytest -m unit --cov=src --cov-report=term-missing -q)"
+        gate_exec "$_d" "$_py" -m pytest -m unit --cov=src --cov-report=term-missing -q
         if [ "$GATE_EXIT" = "5" ]; then
-          gate_exec "(cd '$_d' && '$_py' -m pytest --cov=src --cov-report=term-missing -q)"
+          gate_exec "$_d" "$_py" -m pytest --cov=src --cov-report=term-missing -q
         fi
         gate_finish "pytest failed (exit {exit})"
       fi ;;
     lint)
       # Prefer ruff; fall back to python3 -m ruff, then flake8, then pylint
       if command -v ruff >/dev/null 2>&1; then
-        gate_run "ruff failed" "(cd '$_d' && ruff check .)"
+        gate_run "ruff failed" "$_d" ruff check .
       elif [ -n "$_py" ] && "$_py" -m ruff --version >/dev/null 2>&1; then
-        gate_run "ruff failed" "(cd '$_d' && '$_py' -m ruff check .)"
+        gate_run "ruff failed" "$_d" "$_py" -m ruff check .
       elif command -v flake8 >/dev/null 2>&1; then
-        gate_run "flake8 failed" "(cd '$_d' && flake8 .)"
+        gate_run "flake8 failed" "$_d" flake8 .
       elif [ -n "$_py" ] && "$_py" -m flake8 --version >/dev/null 2>&1; then
-        gate_run "flake8 failed" "(cd '$_d' && '$_py' -m flake8 .)"
+        gate_run "flake8 failed" "$_d" "$_py" -m flake8 .
       elif command -v pylint >/dev/null 2>&1; then
-        gate_run "pylint failed" "(cd '$_d' && pylint src/)"
+        gate_run "pylint failed" "$_d" pylint src/
       else
         gate_skip "linter not installed (ruff/flake8/pylint not found)"
       fi ;;
@@ -246,14 +249,15 @@ _recipe_go() {
     has_tests) find "$_d" -name '*_test.go' 2>/dev/null | grep -q . ;;
     build)
       if command -v go >/dev/null 2>&1; then
-        gate_run "go build failed" "(cd '$_d' && go build ./...)"
+        gate_run "go build failed" "$_d" go build ./...
       else
         gate_skip "toolchain not installed (go not found)"
       fi ;;
     test)
       if command -v go >/dev/null 2>&1; then
-        gate_run "go test failed" "(cd '$_d' && go test -short -coverprofile='$WORK/cov.out' ./... && \
-          go tool cover -func='$WORK/cov.out')"
+        gate_exec "$_d" go test -short -coverprofile="$WORK/cov.out" ./...
+        [ "$GATE_EXIT" = "0" ] && gate_exec_more "$_d" go tool cover -func="$WORK/cov.out"
+        gate_finish "go test failed"
       else
         gate_skip "toolchain not installed (go not found)"
       fi ;;
@@ -261,9 +265,9 @@ _recipe_go() {
       # go vet is always available when Go is installed
       if command -v go >/dev/null 2>&1; then
         if command -v golangci-lint >/dev/null 2>&1; then
-          gate_run "golangci-lint failed" "(cd '$_d' && golangci-lint run)"
+          gate_run "golangci-lint failed" "$_d" golangci-lint run
         else
-          gate_run "go vet failed" "(cd '$_d' && go vet ./...)"
+          gate_run "go vet failed" "$_d" go vet ./...
         fi
       else
         gate_skip "toolchain not installed (go not found)"
@@ -282,19 +286,19 @@ _recipe_rust() {
     has_tests) grep -r '#\[cfg(test)\]' "$_d/src" >/dev/null 2>&1 || [ -d "$_d/tests" ] ;;
     build)
       if command -v cargo >/dev/null 2>&1; then
-        gate_run "cargo build failed" "(cd '$_d' && cargo build)"
+        gate_run "cargo build failed" "$_d" cargo build
       else
         gate_skip "toolchain not installed (cargo not found)"
       fi ;;
     test)
       if command -v cargo >/dev/null 2>&1; then
-        gate_run "cargo test failed" "(cd '$_d' && cargo test --lib)"
+        gate_run "cargo test failed" "$_d" cargo test --lib
       else
         gate_skip "toolchain not installed (cargo not found)"
       fi ;;
     lint)
       if command -v cargo >/dev/null 2>&1; then
-        gate_run "clippy failed" "(cd '$_d' && cargo clippy -- -D warnings)"
+        gate_run "clippy failed" "$_d" cargo clippy -- -D warnings
       else
         gate_skip "toolchain not installed (cargo not found)"
       fi ;;
@@ -315,19 +319,19 @@ _recipe_swift() {
     has_tests) find "$_d" -name '*Tests.swift' 2>/dev/null | grep -q . ;;
     build)
       if command -v swift >/dev/null 2>&1; then
-        gate_run "swift build failed" "(cd '$_d' && swift build)"
+        gate_run "swift build failed" "$_d" swift build
       else
         gate_skip "toolchain not installed (swift not found)"
       fi ;;
     test)
       if command -v swift >/dev/null 2>&1; then
-        gate_run "swift test failed" "(cd '$_d' && swift test --enable-code-coverage)"
+        gate_run "swift test failed" "$_d" swift test --enable-code-coverage
       else
         gate_skip "toolchain not installed (swift not found)"
       fi ;;
     lint)
       if command -v swiftlint >/dev/null 2>&1; then
-        gate_run "swiftlint failed" "(cd '$_d' && swiftlint)"
+        gate_run "swiftlint failed" "$_d" swiftlint
       else
         gate_skip "linter not installed (swiftlint not found)"
       fi ;;
@@ -347,17 +351,18 @@ _recipe_cpp() {
         [ -d "$_d/test" ] || [ -d "$_d/tests" ] ;;
     build)
       if [ -f "$_d/CMakeLists.txt" ] && command -v cmake >/dev/null 2>&1; then
-        gate_run "cmake build failed" \
-          "(cd '$_d' && cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build)"
+        gate_exec "$_d" cmake -B build -DCMAKE_BUILD_TYPE=Release
+        [ "$GATE_EXIT" = "0" ] && gate_exec_more "$_d" cmake --build build
+        gate_finish "cmake build failed"
       elif [ -f "$_d/Makefile" ] && command -v make >/dev/null 2>&1; then
-        gate_run "make failed" "(cd '$_d' && make)"
+        gate_run "make failed" "$_d" make
       else
         gate_skip "toolchain not installed"
       fi ;;
     test)
       if command -v ctest >/dev/null 2>&1; then
         gate_no_coverage
-        gate_run "ctest failed" "(cd '$_d' && ctest --test-dir build)"
+        gate_run "ctest failed" "$_d" ctest --test-dir build
       else
         gate_skip "toolchain not installed (ctest not found)"
       fi ;;
@@ -366,7 +371,7 @@ _recipe_cpp() {
         _cfiles=$(find "$_d" -maxdepth 4 \( -name '*.cpp' -o -name '*.c' \) \
           ! -path '*/build/*' 2>/dev/null | head -100 | tr '\n' ' ')
         if [ -n "$_cfiles" ]; then
-          gate_run "clang-tidy failed" "(cd '$_d' && clang-tidy $_cfiles --)"
+          gate_run "clang-tidy failed" "$_d" clang-tidy $_cfiles --
         else
           gate_skip "no .c/.cpp source files found"
         fi
@@ -400,20 +405,20 @@ _recipe_java() {
     has_tests) [ -d "$_d/src/test" ] ;;
     build)
       if [ -f "$_d/mvnw" ]; then
-        gate_run "mvnw failed" "(cd '$_d' && ./mvnw package -DskipTests)"
+        gate_run "mvnw failed" "$_d" ./mvnw package -DskipTests
       elif command -v mvn >/dev/null 2>&1; then
-        gate_run "mvn failed" "(cd '$_d' && mvn package -DskipTests)"
+        gate_run "mvn failed" "$_d" mvn package -DskipTests
       elif [ -f "$_d/gradlew" ]; then
-        gate_run "gradlew assemble failed" "(cd '$_d' && ./gradlew assemble)"
+        gate_run "gradlew assemble failed" "$_d" ./gradlew assemble
       else
         gate_skip "toolchain not installed"
       fi ;;
     test) _jvm_test "$_d" ;;
     lint)
       if [ -f "$_d/mvnw" ]; then
-        gate_run "checkstyle failed" "(cd '$_d' && ./mvnw checkstyle:check)"
+        gate_run "checkstyle failed" "$_d" ./mvnw checkstyle:check
       elif [ -f "$_d/gradlew" ]; then
-        gate_run "checkstyle failed" "(cd '$_d' && ./gradlew checkstyleMain)"
+        gate_run "checkstyle failed" "$_d" ./gradlew checkstyleMain
       else
         gate_skip "linter not installed"
       fi ;;
@@ -430,14 +435,14 @@ _recipe_kotlin() {
     has_tests) [ -d "$_d/src/test" ] ;;
     build)
       if [ -f "$_d/gradlew" ]; then
-        gate_run "gradlew assemble failed" "(cd '$_d' && ./gradlew assemble)"
+        gate_run "gradlew assemble failed" "$_d" ./gradlew assemble
       else
         gate_skip "toolchain not installed"
       fi ;;
     test) _jvm_test "$_d" ;;
     lint)
       if [ -f "$_d/gradlew" ]; then
-        gate_run "ktlint failed" "(cd '$_d' && ./gradlew ktlintCheck)"
+        gate_run "ktlint failed" "$_d" ./gradlew ktlintCheck
       else
         gate_skip "linter not installed"
       fi ;;
@@ -447,9 +452,9 @@ _recipe_kotlin() {
 
 # Test Gate shared by the JVM Languages (Java, Kotlin).
 _jvm_test() {
-  if [ -f "$1/mvnw" ]; then gate_run "test failed" "(cd '$1' && ./mvnw test)"
-  elif command -v mvn >/dev/null 2>&1; then gate_run "test failed" "(cd '$1' && mvn test)"
-  elif [ -f "$1/gradlew" ]; then gate_run "test failed" "(cd '$1' && ./gradlew test)"
+  if [ -f "$1/mvnw" ]; then gate_run "test failed" "$1" ./mvnw test
+  elif command -v mvn >/dev/null 2>&1; then gate_run "test failed" "$1" mvn test
+  elif [ -f "$1/gradlew" ]; then gate_run "test failed" "$1" ./gradlew test
   else gate_skip "toolchain not installed"; fi
 }
 
@@ -460,19 +465,21 @@ _recipe_scala() {
     has_tests) [ -d "$_d/src/test" ] ;;
     build)
       if command -v sbt >/dev/null 2>&1; then
-        gate_run "sbt compile failed" "(cd '$_d' && sbt compile)"
+        gate_run "sbt compile failed" "$_d" sbt compile
       else
         gate_skip "toolchain not installed (sbt not found)"
       fi ;;
     test)
       if command -v sbt >/dev/null 2>&1; then
-        gate_run "sbt test failed" "(cd '$_d' && sbt 'testOnly *Unit*' || sbt test)"
+        gate_exec "$_d" sbt 'testOnly *Unit*'
+        [ "$GATE_EXIT" = "0" ] || gate_exec_more "$_d" sbt test
+        gate_finish "sbt test failed"
       else
         gate_skip "toolchain not installed (sbt not found)"
       fi ;;
     lint)
       if command -v sbt >/dev/null 2>&1; then
-        gate_run "scalastyle failed" "(cd '$_d' && sbt scalastyle)"
+        gate_run "scalastyle failed" "$_d" sbt scalastyle
       else
         gate_skip "toolchain not installed (sbt not found)"
       fi ;;
@@ -489,20 +496,21 @@ _recipe_dotnet() {
     has_tests) find "$_d" \( -name '*Tests.cs' -o -name '*Test.cs' \) 2>/dev/null | grep -q . ;;
     build)
       if command -v dotnet >/dev/null 2>&1; then
-        gate_run "dotnet build failed" "(cd '$_d' && dotnet restore && dotnet build)"
+        gate_exec "$_d" dotnet restore
+        [ "$GATE_EXIT" = "0" ] && gate_exec_more "$_d" dotnet build
+        gate_finish "dotnet build failed"
       else
         gate_skip "toolchain not installed (dotnet not found)"
       fi ;;
     test)
       if command -v dotnet >/dev/null 2>&1; then
-        gate_run "dotnet test failed" \
-          "(cd '$_d' && dotnet test --no-build --collect:'XPlat Code Coverage')"
+        gate_run "dotnet test failed" "$_d" dotnet test --no-build --collect:'XPlat Code Coverage'
       else
         gate_skip "toolchain not installed (dotnet not found)"
       fi ;;
     lint)
       if command -v dotnet >/dev/null 2>&1; then
-        gate_run "dotnet format failed" "(cd '$_d' && dotnet format --verify-no-changes)"
+        gate_run "dotnet format failed" "$_d" dotnet format --verify-no-changes
       else
         gate_skip "toolchain not installed (dotnet not found)"
       fi ;;
@@ -518,20 +526,21 @@ _recipe_ruby() {
     build)
       if command -v bundle >/dev/null 2>&1 && [ -f "$_d/Rakefile" ] && \
          grep -q 'build' "$_d/Rakefile" 2>/dev/null; then
-        gate_run "rake build failed" "(cd '$_d' && bundle exec rake build)"
+        gate_run "rake build failed" "$_d" bundle exec rake build
       else
         gate_skip "no build step detected"
       fi ;;
     test)
       if command -v bundle >/dev/null 2>&1; then
-        gate_run "rspec failed" \
-          "(cd '$_d' && bundle exec rspec --tag unit spec/ || bundle exec rspec spec/)"
+        gate_exec "$_d" bundle exec rspec --tag unit spec/
+        [ "$GATE_EXIT" = "0" ] || gate_exec_more "$_d" bundle exec rspec spec/
+        gate_finish "rspec failed"
       else
         gate_skip "toolchain not installed (bundle not found)"
       fi ;;
     lint)
       if command -v bundle >/dev/null 2>&1; then
-        gate_run "rubocop failed" "(cd '$_d' && bundle exec rubocop)"
+        gate_run "rubocop failed" "$_d" bundle exec rubocop
       else
         gate_skip "linter not installed (bundle not found)"
       fi ;;
@@ -546,19 +555,19 @@ _recipe_php() {
     has_tests) find "$_d" -name '*Test.php' 2>/dev/null | grep -q . ;;
     build)
       if command -v composer >/dev/null 2>&1; then
-        gate_run "composer install failed" "(cd '$_d' && composer install --no-dev)"
+        gate_run "composer install failed" "$_d" composer install --no-dev
       else
         gate_skip "toolchain not installed (composer not found)"
       fi ;;
     test)
       if [ -f "$_d/vendor/bin/phpunit" ]; then
-        gate_run "phpunit failed" "(cd '$_d' && ./vendor/bin/phpunit --coverage-text)"
+        gate_run "phpunit failed" "$_d" ./vendor/bin/phpunit --coverage-text
       else
         gate_skip "toolchain not installed (phpunit not found)"
       fi ;;
     lint)
       if [ -f "$_d/vendor/bin/phpstan" ]; then
-        gate_run "phpstan failed" "(cd '$_d' && ./vendor/bin/phpstan analyse)"
+        gate_run "phpstan failed" "$_d" ./vendor/bin/phpstan analyse
       else
         gate_skip "linter not installed (phpstan/psalm not found)"
       fi ;;
@@ -576,19 +585,21 @@ _recipe_elixir() {
     has_tests) find "$_d" -name '*_test.exs' 2>/dev/null | grep -q . ;;
     build)
       if command -v mix >/dev/null 2>&1; then
-        gate_run "mix compile failed" "(cd '$_d' && mix compile)"
+        gate_run "mix compile failed" "$_d" mix compile
       else
         gate_skip "toolchain not installed (mix not found)"
       fi ;;
     test)
       if command -v mix >/dev/null 2>&1; then
-        gate_run "mix test failed" "(cd '$_d' && mix test --only unit || mix test)"
+        gate_exec "$_d" mix test --only unit
+        [ "$GATE_EXIT" = "0" ] || gate_exec_more "$_d" mix test
+        gate_finish "mix test failed"
       else
         gate_skip "toolchain not installed (mix not found)"
       fi ;;
     lint)
       if command -v mix >/dev/null 2>&1; then
-        gate_run "mix credo failed" "(cd '$_d' && mix credo)"
+        gate_run "mix credo failed" "$_d" mix credo
       else
         gate_skip "toolchain not installed (mix not found)"
       fi ;;
@@ -609,14 +620,19 @@ _recipe_elixir() {
 gate_pass() { GATE_ST=PASS; GATE_RS=""; GATE_EX=0; }
 gate_skip() { GATE_ST=SKIPPED; GATE_RS="$1"; GATE_EX=null; }
 
-# Run one command (dry-run prints it instead). Leaves its exit code in
-# $GATE_EXIT and its output in $WORK/out.
-gate_exec() {
+# Run one command in <dir> (dry-run prints it instead). Leaves its exit code in
+# $GATE_EXIT and its output in $WORK/out. gate_exec_more appends to that output,
+# for a second command that follows the first (a && b, a || b).
+_gate_cmd() { # <append yes|no> <dir> <cmd> [args...]
+  _app="$1"; _dir="$2"; shift 2
   GATE_RAN=true
-  if [ "$DRY_RUN" = "true" ]; then printf '[DRY RUN] %s\n' "$*"; GATE_EXIT=0; return 0; fi
-  if $VERBOSE; then eval "$*" 2>&1 | tee "$WORK/out"; GATE_EXIT="${PIPESTATUS:-$?}"
-  else eval "$*" > "$WORK/out" 2>&1; GATE_EXIT=$?; fi
+  if [ "$DRY_RUN" = "true" ]; then printf "[DRY RUN] (cd '%s' && %s)\n" "$_dir" "$*"; GATE_EXIT=0; return 0; fi
+  [ "$_app" = "yes" ] || : > "$WORK/out"
+  if $VERBOSE; then (cd "$_dir" && "$@") 2>&1 | tee -a "$WORK/out"; GATE_EXIT="${PIPESTATUS:-$?}"
+  else (cd "$_dir" && "$@") >> "$WORK/out" 2>&1; GATE_EXIT=$?; fi
 }
+gate_exec()      { _gate_cmd no "$@"; }
+gate_exec_more() { _gate_cmd yes "$@"; }
 
 # The test run produced no coverage output to parse later.
 gate_no_coverage() { GATE_COV=false; }
@@ -633,7 +649,7 @@ gate_finish() {
   GATE_LOG=$(_save_sidecar "$_pd" "$_lang" "$_gate")
 }
 
-gate_run() { gate_exec "$2"; gate_finish "$1"; }
+gate_run() { _grr="$1"; shift; gate_exec "$@"; gate_finish "$_grr"; }
 
 _run_gate() {
   _gate="$1"; _pd="$2"; _abs="$3"; _lang="$4"
@@ -713,7 +729,7 @@ printf '\n'
 # Gate Results — one record per Project index and Gate, written once by the
 # gate functions and read only by the report writer and the summary table.
 # Stored as shell variables GR_<index>_<gate>_<field>; names never contain
-# directory names. The only evals in the script's result storage are in
+# directory names. The only evals in the script are in
 # _gr_set and _gr_get.
 #   fields: status reason exit dur log   (+ lpct thr on the coverage gate)
 # ---------------------------------------------------------------------------
@@ -733,9 +749,6 @@ _write_state() {
   _gr_set "$_pi" "$_gate" dur "$_dur"
   _gr_set "$_pi" "$_gate" log "$_log"
 }
-
-# Used only to name the raw coverage log.
-_slug() { printf '%s' "$1" | sed 's|[/.-]|_|g'; }
 
 _sidecar_path() { printf 'validation-logs/%s-%s-%s.log' "$1" "$2" "$3"; }
 
@@ -761,110 +774,10 @@ _status_line() {
 }
 
 # ---------------------------------------------------------------------------
-# Test file detection
-# ---------------------------------------------------------------------------
-_has_tests() {
-  _d="$1"; _l="$2"
-  case "$_l" in
-    *)      return 1 ;;
-  esac
-}
-
-# ---------------------------------------------------------------------------
-# Gate 1: BUILD
-# ---------------------------------------------------------------------------
-_build() {
-  _pd="$1"; _abs="$2"; _lang="$3"
-  if _is_recipe "$_lang"; then _run_gate build "$_pd" "$_abs" "$_lang"; return; fi
-  _st=SKIPPED; _rs="no build command applies"; _ex=null; _log=null
-  _t0=$(date +%s)
-  _status_line "$_pd" "$_lang" "build" "RUNNING"
-
-  _run() {
-    if [ "$DRY_RUN" = "true" ]; then printf '[DRY RUN] %s\n' "$*"; return 0; fi
-    if $VERBOSE; then eval "$*" 2>&1 | tee "$WORK/out"; return "${PIPESTATUS:-$?}"
-    else eval "$*" > "$WORK/out" 2>&1; fi
-  }
-
-  case "$_lang" in
-    *) _st=SKIPPED; _rs="unknown language" ;;
-  esac
-
-  _t1=$(date +%s); _dur=$((_t1 - _t0))
-  _status_line "$_pd" "$_lang" "build" "$_st" "(${_dur}s)"
-  _write_state "build" "$_st" "$_rs" "$_ex" "$_dur" "$_log"
-}
-
-# ---------------------------------------------------------------------------
-# Gate 2: TEST (with coverage collection)
-# ---------------------------------------------------------------------------
-_test() {
-  _pd="$1"; _abs="$2"; _lang="$3"
-  if _is_recipe "$_lang"; then _run_gate test "$_pd" "$_abs" "$_lang"; return; fi
-  _st=SKIPPED; _rs=""; _ex=null; _log=null
-  _t0=$(date +%s)
-  _status_line "$_pd" "$_lang" "test" "RUNNING"
-
-  # Hard FAIL if no test files exist
-  if ! _has_tests "$_abs" "$_lang"; then
-    _st=FAIL; _ex=1
-    _rs="No test files detected — a project must have tests to be reviewable"
-    printf '%s\n' "$_rs" > "$WORK/out"
-    _log=$(_save_sidecar "$_pd" "$_lang" test)
-    _t1=$(date +%s); _dur=$((_t1 - _t0))
-    _status_line "$_pd" "$_lang" "test" "$_st" "$_rs"
-    _write_state "test" "$_st" "$_rs" "$_ex" "$_dur" "$_log"
-    return
-  fi
-
-  _covfile="$WORK/COV_${_pi}"
-
-  _run_test() {
-    if [ "$DRY_RUN" = "true" ]; then printf '[DRY RUN] %s\n' "$*"; return 0; fi
-    if $VERBOSE; then eval "$*" 2>&1 | tee "$WORK/out"
-    else eval "$*" > "$WORK/out" 2>&1; fi
-  }
-
-  case "$_lang" in
-    *) _st=SKIPPED; _rs="unknown language" ;;
-  esac
-
-  _t1=$(date +%s); _dur=$((_t1 - _t0))
-  _status_line "$_pd" "$_lang" "test" "$_st" "(${_dur}s)"
-  _write_state "test" "$_st" "$_rs" "$_ex" "$_dur" "$_log"
-}
-
-# ---------------------------------------------------------------------------
-# Gate 3: LINT
-# ---------------------------------------------------------------------------
-_lint() {
-  _pd="$1"; _abs="$2"; _lang="$3"
-  if _is_recipe "$_lang"; then _run_gate lint "$_pd" "$_abs" "$_lang"; return; fi
-  _st=SKIPPED; _rs=""; _ex=null; _log=null
-  _t0=$(date +%s)
-  _status_line "$_pd" "$_lang" "lint" "RUNNING"
-
-  _run_lint() {
-    if [ "$DRY_RUN" = "true" ]; then printf '[DRY RUN] %s\n' "$*"; return 0; fi
-    if $VERBOSE; then eval "$*" 2>&1 | tee "$WORK/out"
-    else eval "$*" > "$WORK/out" 2>&1; fi
-  }
-
-  case "$_lang" in
-    *) _st=SKIPPED; _rs="unknown language" ;;
-  esac
-
-  _t1=$(date +%s); _dur=$((_t1 - _t0))
-  _status_line "$_pd" "$_lang" "lint" "$_st" "(${_dur}s)"
-  _write_state "lint" "$_st" "$_rs" "$_ex" "$_dur" "$_log"
-}
-
-# ---------------------------------------------------------------------------
 # Gate 4: COVERAGE (parse output captured in Gate 2 — no re-run)
 # ---------------------------------------------------------------------------
 _coverage() {
   _pd="$1"; _abs="$2"; _lang="$3"
-  _slug=$(_slug "$_pd")
   _st=SKIPPED; _rs=""; _ex=null; _log=null
   _lpct=null; _bpct=null; _fpct=null
   _thr=$(_get_threshold "$_lang")
@@ -911,8 +824,8 @@ _coverage() {
 
   if [ -z "$_lpct" ]; then
     _st=SKIPPED; _rs="coverage output unparseable"
-    cp "$_covfile" "$LOG_DIR/${_slug}-${_lang}-coverage-raw.log" 2>/dev/null || true
-    _log="validation-logs/${_slug}-${_lang}-coverage-raw.log"
+    cp "$_covfile" "$LOG_DIR/${_pd}-${_lang}-coverage-raw.log" 2>/dev/null || true
+    _log="validation-logs/${_pd}-${_lang}-coverage-raw.log"
   else
     _passes=$(awk "BEGIN{print ($_lpct+0 >= $_thr+0) ? \"yes\" : \"no\"}")
     if [ "$_passes" = "yes" ]; then
@@ -942,9 +855,9 @@ while IFS='|' read -r _pd _lang; do
   [ "$_pd" = "root" ] && _abs="$INVOCATION_DIR" || _abs="$INVOCATION_DIR/$_pd"
 
   printf '── [%s / %s] ──────────────────────────────────\n' "$_pd" "$_lang"
-  _build   "$_pd" "$_abs" "$_lang"
-  _test    "$_pd" "$_abs" "$_lang"
-  _lint    "$_pd" "$_abs" "$_lang"
+  _run_gate build "$_pd" "$_abs" "$_lang"
+  _run_gate test  "$_pd" "$_abs" "$_lang"
+  _run_gate lint  "$_pd" "$_abs" "$_lang"
   _coverage "$_pd" "$_abs" "$_lang"
   printf '\n'
 done < "$WORK/projects"

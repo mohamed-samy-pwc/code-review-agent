@@ -26,24 +26,6 @@ $VALIDATOR_VERSION = "1.0.0"
 # ---------------------------------------------------------------------------
 # Color helpers (respect NO_COLOR env var)
 # ---------------------------------------------------------------------------
-function Write-Status {
-    param([string]$Status, [string]$Message)
-    if ($env:NO_COLOR) {
-        Write-Host "$Status  $Message"
-        return
-    }
-    $color = switch ($Status) {
-        'PASS'    { 'Green'  }
-        'FAIL'    { 'Red'    }
-        'SKIPPED' { 'Yellow' }
-        'RUNNING' { 'Cyan'   }
-        default   { 'White'  }
-    }
-    Write-Host -NoNewline "  "
-    Write-Host -NoNewline -ForegroundColor $color $Status
-    Write-Host "  $Message"
-}
-
 function Write-GateLine {
     param([string]$Project, [string]$Lang, [string]$Gate, [string]$Status, [string]$Detail = '')
     $color = switch ($Status) {

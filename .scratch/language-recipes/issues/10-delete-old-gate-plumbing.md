@@ -8,7 +8,7 @@ Parent spec: GitHub issue #7 (Spec: Language Recipes, gate runner and Gate Resul
 
 **Status:** ready-for-agent
 
-- [ ] No unreachable per-Language gate code or temp-file state plumbing remains in either script.
-- [ ] The only `eval` in `validate.sh` is in the Gate Result setter and getter.
-- [ ] README describes the Language Recipe structure and how to add a Language.
-- [ ] Full harness passes with pwsh installed; `validation-report.json` is unchanged for every fixture.
+- [x] No unreachable per-Language gate code or temp-file state plumbing remains in either script.
+- [x] The only `eval` in `validate.sh` is in the Gate Result setter and getter.
+- [x] README describes the Language Recipe structure and how to add a Language.
+- [x] Full harness passes with pwsh installed; `validation-report.json` is unchanged for every fixture.
