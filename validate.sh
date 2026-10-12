@@ -123,7 +123,7 @@ printf 'Scanning: %s\n' "$INVOCATION_DIR"
 # (or gate_exec + gate_finish when a Gate runs more than one command).
 # `coverage` prints the line-coverage percentage (nothing if unparseable).
 # ---------------------------------------------------------------------------
-RECIPE_LANGS="typescript python java kotlin go rust swift cpp scala"
+RECIPE_LANGS="typescript python java kotlin go rust dotnet ruby php swift cpp elixir scala"
 _try_recipe() { "_recipe_$1" detect "$_d" && printf '%s' "$1"; }
 _is_recipe() { case " $RECIPE_LANGS " in *" $1 "*) return 0 ;; esac; return 1; }
 
@@ -480,6 +480,125 @@ _recipe_scala() {
   esac
 }
 
+_recipe_dotnet() {
+  _req="$1"; _d="$2"
+  case "$_req" in
+    detect)
+      ls "$_d"/*.csproj >/dev/null 2>&1 || ls "$_d"/*.sln >/dev/null 2>&1 || \
+        [ -f "$_d/global.json" ] ;;
+    has_tests) find "$_d" \( -name '*Tests.cs' -o -name '*Test.cs' \) 2>/dev/null | grep -q . ;;
+    build)
+      if command -v dotnet >/dev/null 2>&1; then
+        gate_run "dotnet build failed" "(cd '$_d' && dotnet restore && dotnet build)"
+      else
+        gate_skip "toolchain not installed (dotnet not found)"
+      fi ;;
+    test)
+      if command -v dotnet >/dev/null 2>&1; then
+        gate_run "dotnet test failed" \
+          "(cd '$_d' && dotnet test --no-build --collect:'XPlat Code Coverage')"
+      else
+        gate_skip "toolchain not installed (dotnet not found)"
+      fi ;;
+    lint)
+      if command -v dotnet >/dev/null 2>&1; then
+        gate_run "dotnet format failed" "(cd '$_d' && dotnet format --verify-no-changes)"
+      else
+        gate_skip "toolchain not installed (dotnet not found)"
+      fi ;;
+    coverage) return 1 ;;
+  esac
+}
+
+_recipe_ruby() {
+  _req="$1"; _d="$2"
+  case "$_req" in
+    detect)    [ -f "$_d/Gemfile" ] ;;
+    has_tests) find "$_d" \( -name '*_spec.rb' -o -name '*_test.rb' \) 2>/dev/null | grep -q . ;;
+    build)
+      if command -v bundle >/dev/null 2>&1 && [ -f "$_d/Rakefile" ] && \
+         grep -q 'build' "$_d/Rakefile" 2>/dev/null; then
+        gate_run "rake build failed" "(cd '$_d' && bundle exec rake build)"
+      else
+        gate_skip "no build step detected"
+      fi ;;
+    test)
+      if command -v bundle >/dev/null 2>&1; then
+        gate_run "rspec failed" \
+          "(cd '$_d' && bundle exec rspec --tag unit spec/ || bundle exec rspec spec/)"
+      else
+        gate_skip "toolchain not installed (bundle not found)"
+      fi ;;
+    lint)
+      if command -v bundle >/dev/null 2>&1; then
+        gate_run "rubocop failed" "(cd '$_d' && bundle exec rubocop)"
+      else
+        gate_skip "linter not installed (bundle not found)"
+      fi ;;
+    coverage) return 1 ;;
+  esac
+}
+
+_recipe_php() {
+  _req="$1"; _d="$2"
+  case "$_req" in
+    detect)    [ -f "$_d/composer.json" ] ;;
+    has_tests) find "$_d" -name '*Test.php' 2>/dev/null | grep -q . ;;
+    build)
+      if command -v composer >/dev/null 2>&1; then
+        gate_run "composer install failed" "(cd '$_d' && composer install --no-dev)"
+      else
+        gate_skip "toolchain not installed (composer not found)"
+      fi ;;
+    test)
+      if [ -f "$_d/vendor/bin/phpunit" ]; then
+        gate_run "phpunit failed" "(cd '$_d' && ./vendor/bin/phpunit --coverage-text)"
+      else
+        gate_skip "toolchain not installed (phpunit not found)"
+      fi ;;
+    lint)
+      if [ -f "$_d/vendor/bin/phpstan" ]; then
+        gate_run "phpstan failed" "(cd '$_d' && ./vendor/bin/phpstan analyse)"
+      else
+        gate_skip "linter not installed (phpstan/psalm not found)"
+      fi ;;
+    coverage)
+      grep 'Lines:' "$GATE_COVFILE" 2>/dev/null | \
+        grep -o '[0-9]*\.[0-9]*%' | sed 's/%//' | head -1
+      return 0 ;;
+  esac
+}
+
+_recipe_elixir() {
+  _req="$1"; _d="$2"
+  case "$_req" in
+    detect)    [ -f "$_d/mix.exs" ] ;;
+    has_tests) find "$_d" -name '*_test.exs' 2>/dev/null | grep -q . ;;
+    build)
+      if command -v mix >/dev/null 2>&1; then
+        gate_run "mix compile failed" "(cd '$_d' && mix compile)"
+      else
+        gate_skip "toolchain not installed (mix not found)"
+      fi ;;
+    test)
+      if command -v mix >/dev/null 2>&1; then
+        gate_run "mix test failed" "(cd '$_d' && mix test --only unit || mix test)"
+      else
+        gate_skip "toolchain not installed (mix not found)"
+      fi ;;
+    lint)
+      if command -v mix >/dev/null 2>&1; then
+        gate_run "mix credo failed" "(cd '$_d' && mix credo)"
+      else
+        gate_skip "toolchain not installed (mix not found)"
+      fi ;;
+    coverage)
+      grep -o '[0-9]*\.[0-9]*% | Total' "$GATE_COVFILE" 2>/dev/null | \
+        sed 's/% | Total//' | head -1
+      return 0 ;;
+  esac
+}
+
 # ---------------------------------------------------------------------------
 # Gate runner — owns timing, status classification, Sidecar Log writing,
 # dry-run and verbose handling, and the Hard Gate rule that a Project with no
@@ -559,13 +678,12 @@ _detect_lang() {
   # go.mod is canonical — *.go files may appear in vendor/ of non-Go projects
   _try_recipe go && return
   _try_recipe rust && return
-  { ls "$_d"/*.csproj >/dev/null 2>&1 || ls "$_d"/*.sln >/dev/null 2>&1 || \
-    [ -f "$_d/global.json" ]; } && printf 'dotnet' && return
-  [ -f "$_d/Gemfile" ]        && printf 'ruby'   && return
-  [ -f "$_d/composer.json" ]  && printf 'php'    && return
+  _try_recipe dotnet && return
+  _try_recipe ruby && return
+  _try_recipe php && return
   _try_recipe swift && return
   _try_recipe cpp && return
-  [ -f "$_d/mix.exs" ]        && printf 'elixir' && return
+  _try_recipe elixir && return
   _try_recipe scala && return
 }
 
@@ -648,10 +766,6 @@ _status_line() {
 _has_tests() {
   _d="$1"; _l="$2"
   case "$_l" in
-    dotnet) find "$_d" \( -name '*Tests.cs' -o -name '*Test.cs' \) 2>/dev/null | grep -q . ;;
-    ruby)   find "$_d" \( -name '*_spec.rb' -o -name '*_test.rb' \) 2>/dev/null | grep -q . ;;
-    php)    find "$_d" -name '*Test.php' 2>/dev/null | grep -q . ;;
-    elixir) find "$_d" -name '*_test.exs' 2>/dev/null | grep -q . ;;
     *)      return 1 ;;
   esac
 }
@@ -673,35 +787,6 @@ _build() {
   }
 
   case "$_lang" in
-    dotnet)
-      if command -v dotnet >/dev/null 2>&1; then
-        _run "(cd '$_abs' && dotnet restore && dotnet build)" && { _st=PASS; _rs=""; _ex=0; } || \
-          { _ex=$?; _st=FAIL; _rs="dotnet build failed"; _log=$(_save_sidecar "$_pd" "$_lang" build); }
-      else
-        _st=SKIPPED; _rs="toolchain not installed (dotnet not found)"
-      fi ;;
-    ruby)
-      if command -v bundle >/dev/null 2>&1 && [ -f "$_abs/Rakefile" ] && \
-         grep -q 'build' "$_abs/Rakefile" 2>/dev/null; then
-        _run "(cd '$_abs' && bundle exec rake build)" && { _st=PASS; _rs=""; _ex=0; } || \
-          { _ex=$?; _st=FAIL; _rs="rake build failed"; _log=$(_save_sidecar "$_pd" "$_lang" build); }
-      else
-        _st=SKIPPED; _rs="no build step detected"
-      fi ;;
-    php)
-      if command -v composer >/dev/null 2>&1; then
-        _run "(cd '$_abs' && composer install --no-dev)" && { _st=PASS; _rs=""; _ex=0; } || \
-          { _ex=$?; _st=FAIL; _rs="composer install failed"; _log=$(_save_sidecar "$_pd" "$_lang" build); }
-      else
-        _st=SKIPPED; _rs="toolchain not installed (composer not found)"
-      fi ;;
-    elixir)
-      if command -v mix >/dev/null 2>&1; then
-        _run "(cd '$_abs' && mix compile)" && { _st=PASS; _rs=""; _ex=0; } || \
-          { _ex=$?; _st=FAIL; _rs="mix compile failed"; _log=$(_save_sidecar "$_pd" "$_lang" build); }
-      else
-        _st=SKIPPED; _rs="toolchain not installed (mix not found)"
-      fi ;;
     *) _st=SKIPPED; _rs="unknown language" ;;
   esac
 
@@ -741,44 +826,6 @@ _test() {
   }
 
   case "$_lang" in
-    dotnet)
-      if command -v dotnet >/dev/null 2>&1; then
-        _run_test "(cd '$_abs' && dotnet test --no-build --collect:'XPlat Code Coverage')" \
-          && _ex=0 || _ex=$?
-        cp "$WORK/out" "$_covfile" 2>/dev/null || true
-        if [ "$_ex" = "0" ]; then _st=PASS; _rs=""
-        else _st=FAIL; _rs="dotnet test failed"; _log=$(_save_sidecar "$_pd" "$_lang" test); fi
-      else
-        _st=SKIPPED; _rs="toolchain not installed (dotnet not found)"
-      fi ;;
-    ruby)
-      if command -v bundle >/dev/null 2>&1; then
-        _run_test "(cd '$_abs' && bundle exec rspec --tag unit spec/ || bundle exec rspec spec/)" \
-          && _ex=0 || _ex=$?
-        cp "$WORK/out" "$_covfile" 2>/dev/null || true
-        if [ "$_ex" = "0" ]; then _st=PASS; _rs=""
-        else _st=FAIL; _rs="rspec failed"; _log=$(_save_sidecar "$_pd" "$_lang" test); fi
-      else
-        _st=SKIPPED; _rs="toolchain not installed (bundle not found)"
-      fi ;;
-    php)
-      if [ -f "$_abs/vendor/bin/phpunit" ]; then
-        _run_test "(cd '$_abs' && ./vendor/bin/phpunit --coverage-text)" && _ex=0 || _ex=$?
-        cp "$WORK/out" "$_covfile" 2>/dev/null || true
-        if [ "$_ex" = "0" ]; then _st=PASS; _rs=""
-        else _st=FAIL; _rs="phpunit failed"; _log=$(_save_sidecar "$_pd" "$_lang" test); fi
-      else
-        _st=SKIPPED; _rs="toolchain not installed (phpunit not found)"
-      fi ;;
-    elixir)
-      if command -v mix >/dev/null 2>&1; then
-        _run_test "(cd '$_abs' && mix test --only unit || mix test)" && _ex=0 || _ex=$?
-        cp "$WORK/out" "$_covfile" 2>/dev/null || true
-        if [ "$_ex" = "0" ]; then _st=PASS; _rs=""
-        else _st=FAIL; _rs="mix test failed"; _log=$(_save_sidecar "$_pd" "$_lang" test); fi
-      else
-        _st=SKIPPED; _rs="toolchain not installed (mix not found)"
-      fi ;;
     *) _st=SKIPPED; _rs="unknown language" ;;
   esac
 
@@ -804,34 +851,6 @@ _lint() {
   }
 
   case "$_lang" in
-    dotnet)
-      if command -v dotnet >/dev/null 2>&1; then
-        _run_lint "(cd '$_abs' && dotnet format --verify-no-changes)" && { _st=PASS; _ex=0; } || \
-          { _ex=$?; _st=FAIL; _rs="dotnet format failed"; _log=$(_save_sidecar "$_pd" "$_lang" lint); }
-      else
-        _st=SKIPPED; _rs="toolchain not installed (dotnet not found)"
-      fi ;;
-    ruby)
-      if command -v bundle >/dev/null 2>&1; then
-        _run_lint "(cd '$_abs' && bundle exec rubocop)" && { _st=PASS; _ex=0; } || \
-          { _ex=$?; _st=FAIL; _rs="rubocop failed"; _log=$(_save_sidecar "$_pd" "$_lang" lint); }
-      else
-        _st=SKIPPED; _rs="linter not installed (bundle not found)"
-      fi ;;
-    php)
-      if [ -f "$_abs/vendor/bin/phpstan" ]; then
-        _run_lint "(cd '$_abs' && ./vendor/bin/phpstan analyse)" && { _st=PASS; _ex=0; } || \
-          { _ex=$?; _st=FAIL; _rs="phpstan failed"; _log=$(_save_sidecar "$_pd" "$_lang" lint); }
-      else
-        _st=SKIPPED; _rs="linter not installed (phpstan/psalm not found)"
-      fi ;;
-    elixir)
-      if command -v mix >/dev/null 2>&1; then
-        _run_lint "(cd '$_abs' && mix credo)" && { _st=PASS; _ex=0; } || \
-          { _ex=$?; _st=FAIL; _rs="mix credo failed"; _log=$(_save_sidecar "$_pd" "$_lang" lint); }
-      else
-        _st=SKIPPED; _rs="toolchain not installed (mix not found)"
-      fi ;;
     *) _st=SKIPPED; _rs="unknown language" ;;
   esac
 
@@ -875,15 +894,9 @@ _coverage() {
   # Parse line coverage percentage from the captured output
   _cov_unsupported=false
   case "$_lang" in
-    typescript|python|go|rust|swift|cpp|java|kotlin|scala)
+    typescript|python|go|rust|swift|cpp|java|kotlin|scala|dotnet|ruby|php|elixir)
       # A recipe with no coverage reader returns non-zero.
       _lpct=$("_recipe_$_lang" coverage "$_abs") || _cov_unsupported=true ;;
-    php)
-      _lpct=$(grep 'Lines:' "$_covfile" 2>/dev/null | \
-        grep -o '[0-9]*\.[0-9]*%' | sed 's/%//' | head -1) ;;
-    elixir)
-      _lpct=$(grep -o '[0-9]*\.[0-9]*% | Total' "$_covfile" 2>/dev/null | \
-        sed 's/% | Total//' | head -1) ;;
     *) _cov_unsupported=true ;;
   esac
 
