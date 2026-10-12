@@ -8,7 +8,7 @@ Parent spec: GitHub issue #7 (Spec: Language Recipes, gate runner and Gate Resul
 
 **Status:** ready-for-agent
 
-- [ ] The runner enforces the no-test-files FAIL with the same reason text as `validate.sh`.
-- [ ] TypeScript and Python reports and Sidecar Logs from `validate.ps1` are identical to before.
-- [ ] Parity group passes for all fixtures.
-- [ ] Full harness passes with pwsh installed.
+- [x] The runner enforces the no-test-files FAIL with the same reason text as `validate.sh`.
+- [x] TypeScript and Python reports and Sidecar Logs from `validate.ps1` are identical to before.
+- [x] Parity group passes for all fixtures.
+- [x] Full harness passes with pwsh installed.
