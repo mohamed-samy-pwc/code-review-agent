@@ -8,8 +8,8 @@ Parent spec: GitHub issue #7 (Spec: Language Recipes, gate runner and Gate Resul
 
 **Status:** ready-for-agent
 
-- [ ] Gate Results are written once and read only by the report writer and the summary table.
+- [x] Gate Results are written once and read only by the report writer and the summary table.
 - [ ] Variable names never contain directory names; the only `eval` in the script is in the setter and getter.
-- [ ] `validation-report.json` is identical to before for every fixture (ignoring timestamp, duration and invocation directory).
+- [x] `validation-report.json` is identical to before for every fixture (ignoring timestamp, duration and invocation directory).
 - [ ] Hostile input tests (quotes and backslashes in the directory name, malicious config values) still pass.
-- [ ] All ticket 01 tests and the full harness pass.
+- [x] All ticket 01 tests and the full harness pass.

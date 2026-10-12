@@ -169,29 +169,32 @@ while IFS='|' read -r _pd _pl; do printf '  %s [%s]\n' "$_pd" "$_pl"; done < "$W
 printf '\n'
 
 # ---------------------------------------------------------------------------
-# State files — written per gate so JSON builder reads them from parent shell
-# (POSIX sh subshells can't export variables back; we use files instead)
-#
-# Per gate: $WORK/STATUS_<slug>_<lang>_<gate>   (PASS|FAIL|SKIPPED)
-#           $WORK/REASON_<slug>_<lang>_<gate>   (reason string)
-#           $WORK/EXIT_<slug>_<lang>_<gate>     (numeric exit code)
-#           $WORK/DUR_<slug>_<lang>_<gate>      (duration seconds)
-#           $WORK/LOG_<slug>_<lang>_<gate>      (sidecar log rel path)
-# Coverage: $WORK/COV_<slug>_<lang>             (raw tool output)
-#           $WORK/LPCT_<slug>_<lang>            (line coverage %)
+# Gate Results — one record per Project index and Gate, written once by the
+# gate functions and read only by the report writer and the summary table.
+# Stored as shell variables GR_<index>_<gate>_<field>; names never contain
+# directory names. The only evals in the script's result storage are in
+# _gr_set and _gr_get.
+#   fields: status reason exit dur log   (+ lpct thr on the coverage gate)
 # ---------------------------------------------------------------------------
 
-_slug() { printf '%s' "$1" | sed 's|[/.-]|_|g'; }
+# Single-quote a value so eval assigns it verbatim.
+_q() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 
+_gr_set() { eval "GR_${1}_${2}_${3}=$(_q "$4")"; }
+_gr_get() { eval "printf '%s' \"\${GR_${1}_${2}_${3}:-}\""; }
+
+# Record a Gate Result for the current Project ($_pi).
 _write_state() {
-  _slug="$1"; _lang="$2"; _gate="$3"
-  _status="$4"; _reason="$5"; _exit="$6"; _dur="$7"; _log="${8:-null}"
-  printf '%s' "$_status" > "$WORK/STATUS_${_slug}_${_lang}_${_gate}"
-  printf '%s' "$_reason" > "$WORK/REASON_${_slug}_${_lang}_${_gate}"
-  printf '%s' "${_exit:-null}" > "$WORK/EXIT_${_slug}_${_lang}_${_gate}"
-  printf '%s' "$_dur"    > "$WORK/DUR_${_slug}_${_lang}_${_gate}"
-  printf '%s' "$_log"    > "$WORK/LOG_${_slug}_${_lang}_${_gate}"
+  _gate="$1"; _status="$2"; _reason="$3"; _exit="$4"; _dur="$5"; _log="${6:-null}"
+  _gr_set "$_pi" "$_gate" status "$_status"
+  _gr_set "$_pi" "$_gate" reason "$_reason"
+  _gr_set "$_pi" "$_gate" exit "${_exit:-null}"
+  _gr_set "$_pi" "$_gate" dur "$_dur"
+  _gr_set "$_pi" "$_gate" log "$_log"
 }
+
+# Used only to name the raw coverage log.
+_slug() { printf '%s' "$1" | sed 's|[/.-]|_|g'; }
 
 _sidecar_path() { printf 'validation-logs/%s-%s-%s.log' "$1" "$2" "$3"; }
 
@@ -248,7 +251,6 @@ _has_tests() {
 # ---------------------------------------------------------------------------
 _build() {
   _pd="$1"; _abs="$2"; _lang="$3"
-  _slug=$(_slug "$_pd")
   _st=SKIPPED; _rs="no build command applies"; _ex=null; _log=null
   _t0=$(date +%s)
   _status_line "$_pd" "$_lang" "build" "RUNNING"
@@ -376,7 +378,7 @@ _build() {
 
   _t1=$(date +%s); _dur=$((_t1 - _t0))
   _status_line "$_pd" "$_lang" "build" "$_st" "(${_dur}s)"
-  _write_state "$_slug" "$_lang" "build" "$_st" "$_rs" "$_ex" "$_dur" "$_log"
+  _write_state "build" "$_st" "$_rs" "$_ex" "$_dur" "$_log"
 }
 
 # ---------------------------------------------------------------------------
@@ -384,7 +386,6 @@ _build() {
 # ---------------------------------------------------------------------------
 _test() {
   _pd="$1"; _abs="$2"; _lang="$3"
-  _slug=$(_slug "$_pd")
   _st=SKIPPED; _rs=""; _ex=null; _log=null
   _t0=$(date +%s)
   _status_line "$_pd" "$_lang" "test" "RUNNING"
@@ -397,11 +398,11 @@ _test() {
     _log=$(_save_sidecar "$_pd" "$_lang" test)
     _t1=$(date +%s); _dur=$((_t1 - _t0))
     _status_line "$_pd" "$_lang" "test" "$_st" "$_rs"
-    _write_state "$_slug" "$_lang" "test" "$_st" "$_rs" "$_ex" "$_dur" "$_log"
+    _write_state "test" "$_st" "$_rs" "$_ex" "$_dur" "$_log"
     return
   fi
 
-  _covfile="$WORK/COV_${_slug}_${_lang}"
+  _covfile="$WORK/COV_${_pi}"
 
   _run_test() {
     if [ "$DRY_RUN" = "true" ]; then printf '[DRY RUN] %s\n' "$*"; return 0; fi
@@ -467,7 +468,7 @@ _test() {
       else _st=SKIPPED; _rs="toolchain not installed"
         _t1=$(date +%s); _dur=$((_t1 - _t0))
         _status_line "$_pd" "$_lang" "test" "$_st" "$_rs"
-        _write_state "$_slug" "$_lang" "test" "$_st" "$_rs" "$_ex" "$_dur" "$_log"; return; fi
+        _write_state "test" "$_st" "$_rs" "$_ex" "$_dur" "$_log"; return; fi
       _run_test "$_tcmd" && _ex=0 || _ex=$?
       cp "$WORK/out" "$_covfile" 2>/dev/null || true
       if [ "$_ex" = "0" ]; then _st=PASS; _rs=""
@@ -541,7 +542,7 @@ _test() {
 
   _t1=$(date +%s); _dur=$((_t1 - _t0))
   _status_line "$_pd" "$_lang" "test" "$_st" "(${_dur}s)"
-  _write_state "$_slug" "$_lang" "test" "$_st" "$_rs" "$_ex" "$_dur" "$_log"
+  _write_state "test" "$_st" "$_rs" "$_ex" "$_dur" "$_log"
 }
 
 # ---------------------------------------------------------------------------
@@ -549,7 +550,6 @@ _test() {
 # ---------------------------------------------------------------------------
 _lint() {
   _pd="$1"; _abs="$2"; _lang="$3"
-  _slug=$(_slug "$_pd")
   _st=SKIPPED; _rs=""; _ex=null; _log=null
   _t0=$(date +%s)
   _status_line "$_pd" "$_lang" "lint" "RUNNING"
@@ -698,7 +698,7 @@ _lint() {
 
   _t1=$(date +%s); _dur=$((_t1 - _t0))
   _status_line "$_pd" "$_lang" "lint" "$_st" "(${_dur}s)"
-  _write_state "$_slug" "$_lang" "lint" "$_st" "$_rs" "$_ex" "$_dur" "$_log"
+  _write_state "lint" "$_st" "$_rs" "$_ex" "$_dur" "$_log"
 }
 
 # ---------------------------------------------------------------------------
@@ -718,18 +718,18 @@ _coverage() {
     _st=SKIPPED; _rs="dry-run mode"
     _t1=$(date +%s); _dur=$((_t1 - _t0))
     _status_line "$_pd" "$_lang" "coverage" "$_st" "$_rs"
-    _write_state "$_slug" "$_lang" "coverage" "$_st" "$_rs" "$_ex" "$_dur" "$_log"
-    printf '%s' "$_lpct" > "$WORK/LPCT_${_slug}_${_lang}"
+    _write_state "coverage" "$_st" "$_rs" "$_ex" "$_dur" "$_log"
+    _gr_set "$_pi" coverage lpct "$_lpct"
     return
   fi
 
-  _covfile="$WORK/COV_${_slug}_${_lang}"
+  _covfile="$WORK/COV_${_pi}"
   if [ ! -f "$_covfile" ]; then
     _st=SKIPPED; _rs="no coverage data (test gate skipped or failed)"
     _t1=$(date +%s); _dur=$((_t1 - _t0))
     _status_line "$_pd" "$_lang" "coverage" "$_st" "$_rs"
-    _write_state "$_slug" "$_lang" "coverage" "$_st" "$_rs" "$_ex" "$_dur" "$_log"
-    printf '%s' "$_lpct" > "$WORK/LPCT_${_slug}_${_lang}"
+    _write_state "coverage" "$_st" "$_rs" "$_ex" "$_dur" "$_log"
+    _gr_set "$_pi" coverage lpct "$_lpct"
     return
   fi
 
@@ -777,8 +777,8 @@ _coverage() {
       _st=SKIPPED; _rs="coverage parsing not implemented for $_lang"
       _t1=$(date +%s); _dur=$((_t1 - _t0))
       _status_line "$_pd" "$_lang" "coverage" "$_st" "$_rs"
-      _write_state "$_slug" "$_lang" "coverage" "$_st" "$_rs" "$_ex" "$_dur" "$_log"
-      printf '%s' "$_lpct" > "$WORK/LPCT_${_slug}_${_lang}"
+      _write_state "coverage" "$_st" "$_rs" "$_ex" "$_dur" "$_log"
+      _gr_set "$_pi" coverage lpct "$_lpct"
       return ;;
   esac
 
@@ -800,16 +800,18 @@ _coverage() {
   _t1=$(date +%s); _dur=$((_t1 - _t0))
   [ -n "$_lpct" ] && _detail="(${_lpct}% vs ${_thr}%, ${_dur}s)" || _detail="(${_dur}s)"
   _status_line "$_pd" "$_lang" "coverage" "$_st" "$_detail"
-  _write_state "$_slug" "$_lang" "coverage" "$_st" "$_rs" "$_ex" "$_dur" "$_log"
-  printf '%s' "${_lpct:-null}" > "$WORK/LPCT_${_slug}_${_lang}"
-  printf '%s' "$_thr" > "$WORK/THR_${_slug}_${_lang}"
+  _write_state "coverage" "$_st" "$_rs" "$_ex" "$_dur" "$_log"
+  _gr_set "$_pi" coverage lpct "${_lpct:-null}"
+  _gr_set "$_pi" coverage thr "$_thr"
 }
 
 # ---------------------------------------------------------------------------
 # RUN ALL GATES
 # ---------------------------------------------------------------------------
+_pi=0
 while IFS='|' read -r _pd _lang; do
   [ -z "$_pd" ] && continue
+  _pi=$((_pi + 1))
   [ "$_pd" = "root" ] && _abs="$INVOCATION_DIR" || _abs="$INVOCATION_DIR/$_pd"
 
   printf '── [%s / %s] ──────────────────────────────────\n' "$_pd" "$_lang"
@@ -832,26 +834,21 @@ if [ "$DRY_RUN" = "false" ]; then
   # Build projects JSON
   _proj_arr=""
   _pfirst=true
+  _pi=0
   while IFS='|' read -r _pd _lang; do
     [ -z "$_pd" ] && continue
+    _pi=$((_pi + 1))
     _tp=$((_tp + 1))
-    _slug=$(_slug "$_pd")
     _gates_json=""
     _gfirst=true
 
     for _gate in build test lint coverage; do
       _tg=$((_tg + 1))
-      _stf="$WORK/STATUS_${_slug}_${_lang}_${_gate}"
-      _rsf="$WORK/REASON_${_slug}_${_lang}_${_gate}"
-      _exf="$WORK/EXIT_${_slug}_${_lang}_${_gate}"
-      _duf="$WORK/DUR_${_slug}_${_lang}_${_gate}"
-      _lgf="$WORK/LOG_${_slug}_${_lang}_${_gate}"
-
-      _gs=$(cat "$_stf" 2>/dev/null || printf 'SKIPPED')
-      _rs=$(cat "$_rsf" 2>/dev/null || true)
-      _ex=$(cat "$_exf" 2>/dev/null || printf 'null')
-      _du=$(cat "$_duf" 2>/dev/null || printf '0')
-      _lp=$(cat "$_lgf" 2>/dev/null || printf 'null')
+      _gs=$(_gr_get "$_pi" "$_gate" status); [ -n "$_gs" ] || _gs=SKIPPED
+      _rs=$(_gr_get "$_pi" "$_gate" reason)
+      _ex=$(_gr_get "$_pi" "$_gate" exit); [ -n "$_ex" ] || _ex=null
+      _du=$(_gr_get "$_pi" "$_gate" dur); [ -n "$_du" ] || _du=0
+      _lp=$(_gr_get "$_pi" "$_gate" log); [ -n "$_lp" ] || _lp=null
 
       case "$_gs" in
         PASS)    _tpass=$((_tpass+1)) ;;
@@ -871,9 +868,8 @@ if [ "$DRY_RUN" = "false" ]; then
 
       _xtra=""
       if [ "$_gate" = "coverage" ]; then
-        _lpct=$(cat "$WORK/LPCT_${_slug}_${_lang}" 2>/dev/null || printf 'null')
-        _thr=$(cat "$WORK/THR_${_slug}_${_lang}" 2>/dev/null || printf '%s' "$COVERAGE_THRESHOLD")
-        [ -z "$_lpct" ] && _lpct="null"
+        _lpct=$(_gr_get "$_pi" coverage lpct); [ -n "$_lpct" ] || _lpct=null
+        _thr=$(_gr_get "$_pi" coverage thr); [ -n "$_thr" ] || _thr=$COVERAGE_THRESHOLD
         _xtra=', "line_coverage_pct": '"$_lpct"', "branch_coverage_pct": null, "function_coverage_pct": null, "threshold_pct": '"$_thr"
       fi
 
@@ -914,14 +910,13 @@ printf '┌──────────────┬────────
 printf '│ %-12s │ %-10s │ %-9s │ %-8s │ %-42s │\n' "Project" "Language" "Gate" "Result" "Detail"
 printf '├──────────────┼────────────┼───────────┼──────────┼────────────────────────────────────────────┤\n'
 
+_pi=0
 while IFS='|' read -r _pd _lang; do
   [ -z "$_pd" ] && continue
-  _slug=$(_slug "$_pd")
+  _pi=$((_pi + 1))
   for _gate in build test lint coverage; do
-    _stf="$WORK/STATUS_${_slug}_${_lang}_${_gate}"
-    _rsf="$WORK/REASON_${_slug}_${_lang}_${_gate}"
-    _gs=$(cat "$_stf" 2>/dev/null || printf 'SKIPPED')
-    _rs=$(cat "$_rsf" 2>/dev/null || true)
+    _gs=$(_gr_get "$_pi" "$_gate" status); [ -n "$_gs" ] || _gs=SKIPPED
+    _rs=$(_gr_get "$_pi" "$_gate" reason)
     _detail=$(printf '%.42s' "$_rs")
     printf '│ %-12s │ %-10s │ %-9s │ %-8s │ %-42s │\n' \
       "$_pd" "$_lang" "$_gate" "$_gs" "$_detail"
