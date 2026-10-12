@@ -338,6 +338,42 @@ rm -f "$FIXTURES/js-ts-low-coverage/.validation.conf"
 printf '\n'
 
 # ==========================================================================
+# GROUP 11: validate.ps1 parity with validate.sh (needs pwsh, else PENDING)
+# ==========================================================================
+printf '── Group 11: validate.ps1 parity with validate.sh ─────────\n'
+
+# Reduce a report to the fields that must match across both scripts.
+_report_signature() {
+  grep -o '"\(validator_version\|overall_pass\|status\|total_projects\|total_gates_run\|passed\|failed\|skipped\)" *: *[^,}]*' "$1" | tr -d ' \n'
+}
+
+if command -v pwsh >/dev/null 2>&1; then
+  for fx in js-ts-passing js-ts-test-fail js-ts-no-tests js-ts-no-eslint-config js-ts-low-coverage python-passing monorepo no-signals; do
+    dir="$FIXTURES/$fx"
+    sh_exit=$(run_validate "$dir")
+    sh_sig=""; [ -f "$dir/validation-report.json" ] && sh_sig=$(_report_signature "$dir/validation-report.json")
+    rm -rf "$dir/validation-report.json" "$dir/validation-logs"
+    ps_exit=0
+    (cd "$dir" && NO_COLOR=1 pwsh -NoProfile -File "$REPO_ROOT/validate.ps1") > /dev/null 2>&1 || ps_exit=$?
+    ps_sig=""; [ -f "$dir/validation-report.json" ] && ps_sig=$(_report_signature "$dir/validation-report.json")
+    assert_exit_code "$sh_exit" "$ps_exit" "validate.ps1 exit code matches validate.sh on $fx"
+    if [ "$sh_sig" = "$ps_sig" ]; then
+      _color "$GREEN"; printf '  PASS'; _color "$RESET"
+      printf ' report signature matches on %s\n' "$fx"
+      PASS_COUNT=$((PASS_COUNT + 1))
+    else
+      _color "$RED"; printf '  FAIL'; _color "$RESET"
+      printf ' report signature differs on %s\n    sh: %s\n    ps: %s\n' "$fx" "$sh_sig" "$ps_sig"
+      FAIL_COUNT=$((FAIL_COUNT + 1))
+    fi
+  done
+else
+  pending "validate.ps1 parity (pwsh not installed)"
+fi
+
+printf '\n'
+
+# ==========================================================================
 # SUMMARY
 # ==========================================================================
 printf '══════════════════════════════════════════════════════════\n'

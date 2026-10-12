@@ -218,6 +218,21 @@ function Find-Cmd { param([string]$Name)
     return $null -ne (Get-Command $Name -ErrorAction SilentlyContinue)
 }
 
+# Path of python3 (or python), or $null. PowerShell 5.1 compatible (no ?. / ??).
+function Get-PythonPath {
+    foreach ($n in 'python3','python') {
+        $c = Get-Command $n -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($c) { return $c.Source }
+    }
+    return $null
+}
+
+# True when `python -m <module> <args>` succeeds.
+function Test-PythonModule { param([string]$Py, [string[]]$ModuleArgs)
+    & $Py @ModuleArgs *>$null
+    return ($LASTEXITCODE -eq 0)
+}
+
 # ---------------------------------------------------------------------------
 # Test file detection
 # ---------------------------------------------------------------------------
@@ -226,12 +241,12 @@ function Test-HasTestFiles { param([string]$Dir, [string]$Lang)
         'typescript' {
             $patterns = '*.test.js','*.test.ts','*.test.jsx','*.test.tsx','*.spec.js','*.spec.ts','*.spec.jsx','*.spec.tsx'
             foreach ($p in $patterns) {
-                if (Get-ChildItem -Path $Dir -Filter $p -Recurse -Exclude 'node_modules' -ErrorAction SilentlyContinue | Select-Object -First 1) { return $true }
+                if (Get-ChildItem -Path $Dir -Filter $p -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '[\\/]node_modules[\\/]' } | Select-Object -First 1) { return $true }
             }
             return $false
         }
         'python'  { return $null -ne (Get-ChildItem -Path $Dir -Recurse -Include 'test_*.py','*_test.py' -ErrorAction SilentlyContinue | Select-Object -First 1) }
-        'java','kotlin' { return Test-Path "$Dir/src/test" }
+        { $_ -in 'java','kotlin' } { return Test-Path "$Dir/src/test" }
         'go'      { return $null -ne (Get-ChildItem -Path $Dir -Recurse -Filter '*_test.go' -ErrorAction SilentlyContinue | Select-Object -First 1) }
         'rust'    { return (Test-Path "$Dir/tests") -or ($null -ne (Select-String -Path "$Dir/src/*.rs" -Pattern '\[cfg\(test\)\]' -ErrorAction SilentlyContinue | Select-Object -First 1)) }
         'dotnet'  { return $null -ne (Get-ChildItem -Path $Dir -Recurse -Include '*Tests.cs','*Test.cs' -ErrorAction SilentlyContinue | Select-Object -First 1) }
@@ -269,8 +284,8 @@ function Invoke-BuildGate { param($P)
             } else { $st='SKIPPED'; $rs='no build script and tsc not found' }
         }
         'python' {
-            $py = (Get-Command 'python3' -ErrorAction SilentlyContinue)?.Source ?? (Get-Command 'python' -ErrorAction SilentlyContinue)?.Source
-            if ($py -and (& $py -c "import build" 2>$null; $?)) {
+            $py = Get-PythonPath
+            if ($py -and (Test-PythonModule $py @('-c','import build'))) {
                 $r = Invoke-Tool $abs @('-m','build') $py
                 if ($r.ExitCode -eq 0) { $st='PASS'; $rs=''; $ex=0 }
                 else { $st='FAIL'; $ex=$r.ExitCode; $rs='python build failed'; $lf=Save-Sidecar $pd $lang 'build' $r.Output }
@@ -344,7 +359,7 @@ function Invoke-TestGate { param($P)
             else { $st='FAIL'; $ex=$r.ExitCode; $rs="npm test failed (exit $($r.ExitCode))"; $lf=Save-Sidecar $pd $lang 'test' $r.Output }
         }
         'python' {
-            $py = (Get-Command 'python3' -ErrorAction SilentlyContinue)?.Source ?? (Get-Command 'python' -ErrorAction SilentlyContinue)?.Source
+            $py = Get-PythonPath
             if (-not $py) { $st='SKIPPED'; $rs='python not found'; break }
             $r = Invoke-Tool $abs @('-m','pytest','-m','unit','--cov=src','--cov-report=term-missing','-q') $py
             if ($r.ExitCode -eq 5) {
@@ -405,13 +420,13 @@ function Invoke-LintGate { param($P)
             else { $st='FAIL'; $ex=$r.ExitCode; $rs="eslint failed (exit $($r.ExitCode))"; $lf=Save-Sidecar $pd $lang 'lint' $r.Output }
         }
         'python' {
-            $py = (Get-Command 'python3' -ErrorAction SilentlyContinue)?.Source ?? (Get-Command 'python' -ErrorAction SilentlyContinue)?.Source
+            $py = Get-PythonPath
             $ruff = Get-Command 'ruff' -ErrorAction SilentlyContinue
             if ($ruff) {
                 $r = Invoke-Tool $abs @('check','.') 'ruff'
                 if ($r.ExitCode -eq 0) { $st='PASS'; $ex=0 }
                 else { $st='FAIL'; $ex=$r.ExitCode; $rs='ruff failed'; $lf=Save-Sidecar $pd $lang 'lint' $r.Output }
-            } elseif ($py -and (& $py -m ruff --version 2>$null; $?)) {
+            } elseif ($py -and (Test-PythonModule $py @('-m','ruff','--version'))) {
                 $r = Invoke-Tool $abs @('-m','ruff','check','.') $py
                 if ($r.ExitCode -eq 0) { $st='PASS'; $ex=0 }
                 else { $st='FAIL'; $ex=$r.ExitCode; $rs='ruff failed'; $lf=Save-Sidecar $pd $lang 'lint' $r.Output }
@@ -564,7 +579,7 @@ if (-not $DryRun) {
 
     $projectsArr = $Projects | ForEach-Object {
         $pd = $_.Dir; $lang = $_.Lang
-        $gates = @{}
+        $gates = [ordered]@{}
         foreach ($gate in @('build','test','lint','coverage')) {
             $r = $GateResults["$pd|$lang|$gate"]
             $gObj = [ordered]@{

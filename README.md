@@ -158,6 +158,7 @@ The harness runs `validate.sh` against each directory in `fixtures/`, then asser
 
 **Prerequisites** (the script never installs anything):
 - Node and npm. The JS/TS fixtures ship with their `node_modules` committed so they run offline.
+- `pwsh` (optional) for the PowerShell parity group.
 - `pytest`, `pytest-cov` and `ruff` for the Python fixtures. One way to install them:
   ```sh
   python3 -m venv .venv && . .venv/bin/activate && pip install pytest pytest-cov ruff
@@ -184,11 +185,10 @@ Generated `validation-report.json` and `validation-logs/` inside `fixtures/` are
 
 ## Status and known gaps
 
-- `validate.sh` and `tests/run.sh` pass: 24 assertions, 0 failures, on macOS.
-- **`validate.ps1` is unverified.** It exists but has not been run, because no PowerShell was available. Run it on a Windows or `pwsh` host and compare its reports against `validate.sh` before relying on it (GitHub issue #5).
+- `./tests/run.sh` passes: 40 assertions, 0 failures, on macOS with PowerShell 7.6 installed. Group 11 compares `validate.ps1` against `validate.sh` on every fixture (exit code, `overall_pass`, gate statuses, summary counts). It shows PENDING when `pwsh` is not on the `PATH`.
+- `validate.ps1` has only been run under PowerShell 7 on macOS. It avoids 7-only syntax, but Windows PowerShell 5.1 and `validate.bat` have not been exercised.
 - `fixtures/*/node_modules` is committed (about 33,000 files) so the JS fixtures run offline. Consider vendoring less.
 - `fixtures/monorepo/frontend/.eslintrc.json` is a legacy config that ESLint 10 ignores. It has no effect today because that fixture does not install ESLint.
-- Issues #1–#4 and #6 are verified by the harness but still open on GitHub. The authenticated `gh` account lacked permission to close issues or push.
 - Out of scope: integration tests, security scanning, auto-fixing lint, installing missing tools, parallel gates, per-gate timeouts, and languages beyond the 13 above.
 
 ## Working on this repo
