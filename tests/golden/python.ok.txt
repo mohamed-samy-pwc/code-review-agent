@@ -1,0 +1,11 @@
+exit 0
+calls:
+python3 -c import build
+python3 -m build
+python3 -m pytest -m unit --cov=src --cov-report=term-missing -q
+ruff check .
+gates:
+build PASS exit=0 reason=null log=null line_pct= threshold=
+test PASS exit=0 reason=null log=null line_pct= threshold=
+lint PASS exit=0 reason=null log=null line_pct= threshold=
+coverage PASS exit=null reason=null log=null line_pct=92 threshold=80

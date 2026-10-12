@@ -1,0 +1,11 @@
+exit 0
+calls:
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+ctest --test-dir build
+clang-tidy <DIR>/a_test.cpp --
+gates:
+build PASS exit=0 reason=null log=null line_pct= threshold=
+test PASS exit=0 reason=null log=null line_pct= threshold=
+lint PASS exit=0 reason=null log=null line_pct= threshold=
+coverage SKIPPED exit=null reason="no coverage data (test gate skipped or failed)" log=null line_pct=null threshold=80

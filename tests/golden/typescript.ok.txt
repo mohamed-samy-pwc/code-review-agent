@@ -1,0 +1,10 @@
+exit 0
+calls:
+npm run build
+npm test -- --coverage --coverageReporters=text --testPathPattern=(unit|spec) --forceExit
+eslint .
+gates:
+build PASS exit=0 reason=null log=null line_pct= threshold=
+test PASS exit=0 reason=null log=null line_pct= threshold=
+lint PASS exit=0 reason=null log=null line_pct= threshold=
+coverage PASS exit=null reason=null log=null line_pct=85 threshold=80

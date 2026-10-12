@@ -1,0 +1,10 @@
+exit 0
+calls:
+mvnw package -DskipTests
+mvnw test
+mvnw checkstyle:check
+gates:
+build PASS exit=0 reason=null log=null line_pct= threshold=
+test PASS exit=0 reason=null log=null line_pct= threshold=
+lint PASS exit=0 reason=null log=null line_pct= threshold=
+coverage PASS exit=null reason=null log=null line_pct=90.0 threshold=80

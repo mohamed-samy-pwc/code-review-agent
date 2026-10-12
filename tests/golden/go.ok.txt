@@ -1,0 +1,11 @@
+exit 0
+calls:
+go build ./...
+go test -short -coverprofile=<WORK>/cov.out ./...
+go tool cover -func=<WORK>/cov.out
+golangci-lint run
+gates:
+build PASS exit=0 reason=null log=null line_pct= threshold=
+test PASS exit=0 reason=null log=null line_pct= threshold=
+lint PASS exit=0 reason=null log=null line_pct= threshold=
+coverage PASS exit=null reason=null log=null line_pct=91.2 threshold=80

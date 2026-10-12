@@ -1,0 +1,10 @@
+exit 0
+calls:
+composer install --no-dev
+phpunit --coverage-text
+phpstan analyse
+gates:
+build PASS exit=0 reason=null log=null line_pct= threshold=
+test PASS exit=0 reason=null log=null line_pct= threshold=
+lint PASS exit=0 reason=null log=null line_pct= threshold=
+coverage PASS exit=null reason=null log=null line_pct=91.00 threshold=80

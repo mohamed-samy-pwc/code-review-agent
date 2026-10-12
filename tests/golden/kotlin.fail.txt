@@ -1,0 +1,10 @@
+exit 1
+calls:
+gradlew assemble
+gradlew test
+gradlew ktlintCheck
+gates:
+build FAIL exit=1 reason="gradlew assemble failed" log="validation-logs/root-kotlin-build.log" line_pct= threshold=
+test FAIL exit=1 reason="test failed" log="validation-logs/root-kotlin-test.log" line_pct= threshold=
+lint FAIL exit=1 reason="ktlint failed" log="validation-logs/root-kotlin-lint.log" line_pct= threshold=
+coverage PASS exit=null reason=null log=null line_pct=80.0 threshold=80

@@ -8,9 +8,9 @@ Parent spec: GitHub issue #7 (Spec: Language Recipes, gate runner and Gate Resul
 
 **Status:** ready-for-agent
 
-- [ ] Stub binaries exist for every tool the 13 Languages invoke, and log their arguments to a file the tests can read.
-- [ ] One fixture per Language (signal file plus one test file) is added; fixtures need no network and no installed toolchain.
-- [ ] For each Language, tests assert the exact command line issued for each Gate that runs a command, and the Gate Result status and reason for all four Gates.
-- [ ] Tests give the same result on a machine with none of the real tools installed.
-- [ ] The existing harness assertions, including parity and hostile-input groups, still pass.
-- [ ] `CONTEXT.md` is committed.
+- [x] Stub binaries exist for every tool the 13 Languages invoke, and log their arguments to a file the tests can read.
+- [x] One fixture per Language (signal file plus one test file) is added; fixtures need no network and no installed toolchain.
+- [x] For each Language, tests assert the exact command line issued for each Gate that runs a command, and the Gate Result status and reason for all four Gates.
+- [x] Tests give the same result on a machine with none of the real tools installed.
+- [x] The existing harness assertions, including parity and hostile-input groups, still pass.
+- [x] `CONTEXT.md` is committed.

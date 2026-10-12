@@ -1,0 +1,10 @@
+exit 1
+calls:
+npm run build
+npm test -- --coverage --coverageReporters=text --testPathPattern=(unit|spec) --forceExit
+eslint .
+gates:
+build FAIL exit=1 reason="npm run build failed (exit 1)" log="validation-logs/root-typescript-build.log" line_pct= threshold=
+test FAIL exit=1 reason="npm test failed (exit 1)" log="validation-logs/root-typescript-test.log" line_pct= threshold=
+lint FAIL exit=1 reason="eslint failed (exit 1)" log="validation-logs/root-typescript-lint.log" line_pct= threshold=
+coverage PASS exit=null reason=null log=null line_pct=85 threshold=80

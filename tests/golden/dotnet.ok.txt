@@ -1,0 +1,11 @@
+exit 0
+calls:
+dotnet restore
+dotnet build
+dotnet test --no-build --collect:XPlat Code Coverage
+dotnet format --verify-no-changes
+gates:
+build PASS exit=0 reason=null log=null line_pct= threshold=
+test PASS exit=0 reason=null log=null line_pct= threshold=
+lint PASS exit=0 reason=null log=null line_pct= threshold=
+coverage SKIPPED exit=null reason="coverage parsing not implemented for dotnet" log=null line_pct=null threshold=80

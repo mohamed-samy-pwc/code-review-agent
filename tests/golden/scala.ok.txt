@@ -1,0 +1,10 @@
+exit 0
+calls:
+sbt compile
+sbt testOnly *Unit*
+sbt scalastyle
+gates:
+build PASS exit=0 reason=null log=null line_pct= threshold=
+test PASS exit=0 reason=null log=null line_pct= threshold=
+lint PASS exit=0 reason=null log=null line_pct= threshold=
+coverage SKIPPED exit=null reason="coverage parsing not implemented for scala" log=null line_pct=null threshold=80

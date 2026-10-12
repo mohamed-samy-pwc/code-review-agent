@@ -1,0 +1,7 @@
+exit 0
+calls:
+gates:
+build SKIPPED exit=null reason="toolchain not installed (swift not found)" log=null line_pct= threshold=
+test SKIPPED exit=null reason="toolchain not installed (swift not found)" log=null line_pct= threshold=
+lint SKIPPED exit=null reason="linter not installed (swiftlint not found)" log=null line_pct= threshold=
+coverage SKIPPED exit=null reason="no coverage data (test gate skipped or failed)" log=null line_pct=null threshold=80

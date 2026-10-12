@@ -1,0 +1,11 @@
+exit 1
+calls:
+sbt compile
+sbt testOnly *Unit*
+sbt test
+sbt scalastyle
+gates:
+build FAIL exit=1 reason="sbt compile failed" log="validation-logs/root-scala-build.log" line_pct= threshold=
+test FAIL exit=1 reason="sbt test failed" log="validation-logs/root-scala-test.log" line_pct= threshold=
+lint FAIL exit=1 reason="scalastyle failed" log="validation-logs/root-scala-lint.log" line_pct= threshold=
+coverage SKIPPED exit=null reason="coverage parsing not implemented for scala" log=null line_pct=null threshold=80

@@ -165,6 +165,8 @@ The harness runs `validate.sh` against each directory in `fixtures/`, then asser
   ```
   Activate the venv before running `./tests/run.sh`.
 
+**Fake-toolchain characterization (Group 13).** `tests/characterization.sh` builds a throwaway Project for each of the 13 Languages and runs the script with a `PATH` that holds only stub executables and a few system utilities, so it needs no real toolchain and gives the same result on any machine. Each Language runs three times: every tool present and exiting 0 (`ok`), no tools (`missing`), and every tool exiting 1 (`fail`). The commands each Gate issued and each Gate Result are compared with `tests/golden/<lang>.<scenario>.txt`. After an intended behaviour change, regenerate with `UPDATE_GOLDEN=1 ./tests/run.sh` and review the diff.
+
 **Adding a test case:**
 1. `exit_code=$(run_validate "$FIXTURES/<fixture>" [flags])`
 2. `assert_exit_code <expected> "$exit_code" "<description>"`
@@ -185,7 +187,7 @@ Generated `validation-report.json` and `validation-logs/` inside `fixtures/` are
 
 ## Status and known gaps
 
-- `./tests/run.sh` passes: 45 assertions, 0 failures, on macOS with PowerShell 7.6 installed. Group 11 compares `validate.ps1` against `validate.sh` on every fixture (exit code, `overall_pass`, gate statuses, summary counts). It shows PENDING when `pwsh` is not on the `PATH`.
+- `./tests/run.sh` passes: 86 assertions, 0 failures, on macOS with PowerShell 7.6 installed. Group 11 compares `validate.ps1` against `validate.sh` on every fixture (exit code, `overall_pass`, gate statuses, summary counts). It shows PENDING when `pwsh` is not on the `PATH`.
 - `validate.ps1` has only been run under PowerShell 7 on macOS. It avoids 7-only syntax, but Windows PowerShell 5.1 and `validate.bat` have not been exercised.
 - `fixtures/*/node_modules` is committed (about 33,000 files) so the JS fixtures run offline. Consider vendoring less.
 - `fixtures/monorepo/frontend/.eslintrc.json` is a legacy config that ESLint 10 ignores. It has no effect today because that fixture does not install ESLint.

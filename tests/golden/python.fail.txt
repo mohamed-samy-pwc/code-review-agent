@@ -1,0 +1,10 @@
+exit 1
+calls:
+python3 -c import build
+python3 -m pytest -m unit --cov=src --cov-report=term-missing -q
+ruff check .
+gates:
+build SKIPPED exit=null reason="no build tool detected" log=null line_pct= threshold=
+test FAIL exit=1 reason="pytest failed (exit 1)" log="validation-logs/root-python-test.log" line_pct= threshold=
+lint FAIL exit=1 reason="ruff failed" log="validation-logs/root-python-lint.log" line_pct= threshold=
+coverage PASS exit=null reason=null log=null line_pct=92 threshold=80

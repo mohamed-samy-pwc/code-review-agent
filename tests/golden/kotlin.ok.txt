@@ -1,0 +1,10 @@
+exit 0
+calls:
+gradlew assemble
+gradlew test
+gradlew ktlintCheck
+gates:
+build PASS exit=0 reason=null log=null line_pct= threshold=
+test PASS exit=0 reason=null log=null line_pct= threshold=
+lint PASS exit=0 reason=null log=null line_pct= threshold=
+coverage PASS exit=null reason=null log=null line_pct=80.0 threshold=80

@@ -1,0 +1,10 @@
+exit 0
+calls:
+cargo build
+cargo test --lib
+cargo clippy -- -D warnings
+gates:
+build PASS exit=0 reason=null log=null line_pct= threshold=
+test PASS exit=0 reason=null log=null line_pct= threshold=
+lint PASS exit=0 reason=null log=null line_pct= threshold=
+coverage PASS exit=null reason=null log=null line_pct=85.00 threshold=80
