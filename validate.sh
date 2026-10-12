@@ -49,6 +49,15 @@ trap 'rm -rf "$WORK"' EXIT
 # Config (.validation.conf INI format)
 # ---------------------------------------------------------------------------
 COVERAGE_THRESHOLD=80
+# Thresholds must be integers 0-100; anything else is a script error (exit 2).
+_check_threshold() {
+  case "$2" in
+    ''|*[!0-9]*) printf 'Invalid value for %s in .validation.conf: "%s" (expected integer 0-100)\n' "$1" "$2" >&2; exit 2 ;;
+  esac
+  if [ "$2" -gt 100 ]; then
+    printf 'Invalid value for %s in .validation.conf: "%s" (expected integer 0-100)\n' "$1" "$2" >&2; exit 2
+  fi
+}
 _read_conf() {
   [ -f ".validation.conf" ] || return 0
   while IFS='=' read -r _k _v; do
@@ -56,9 +65,15 @@ _read_conf() {
     _k=$(printf '%s' "$_k" | sed 's/[[:space:]]//g')
     _v=$(printf '%s' "$_v" | sed 's/#.*//;s/[[:space:]]*$//')
     case "$_k" in
-      COVERAGE_THRESHOLD)   COVERAGE_THRESHOLD="$_v" ;;
+      COVERAGE_THRESHOLD)   _check_threshold "$_k" "$_v"; COVERAGE_THRESHOLD="$_v" ;;
       VERBOSE)              [ "$_v" = "true" ] && VERBOSE=true ;;
-      COVERAGE_THRESHOLD_*) eval "CLANG_THRESH_${_k#COVERAGE_THRESHOLD_}=$_v" ;;
+      COVERAGE_THRESHOLD_*)
+        _check_threshold "$_k" "$_v"
+        # Key suffix is validated here, so the eval below can only assign a number.
+        case "${_k#COVERAGE_THRESHOLD_}" in
+          *[!A-Za-z0-9_]*|'') printf 'Invalid config key: %s\n' "$_k" >&2; exit 2 ;;
+        esac
+        eval "CLANG_THRESH_${_k#COVERAGE_THRESHOLD_}=$_v" ;;
     esac
   done < ".validation.conf"
 }
@@ -68,6 +83,13 @@ _get_threshold() {
   _U=$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')
   eval "_t=\${CLANG_THRESH_${_U}:-}"
   [ -n "$_t" ] && printf '%s' "$_t" || printf '%s' "$COVERAGE_THRESHOLD"
+}
+
+# ---------------------------------------------------------------------------
+# JSON string escaping: \\ " and control characters (tab, CR; newlines become \\n)
+# ---------------------------------------------------------------------------
+_json_esc() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e "s/$(printf '\t')/\\\\t/g" -e "s/$(printf '\r')/\\\\r/g" | awk 'BEGIN{ORS=""} NR>1{print "\\n"} {print}'
 }
 
 # ---------------------------------------------------------------------------
@@ -833,11 +855,11 @@ if [ "$DRY_RUN" = "false" ]; then
       esac
 
       # JSON-escape reason
-      _rs_j=$(printf '%s' "$_rs" | sed 's/\\/\\\\/g;s/"/\\"/g')
+      _rs_j=$(_json_esc "$_rs")
 
       # Log file JSON value
       if [ "$_lp" = "null" ] || [ -z "$_lp" ]; then _lp_j="null"
-      else _lp_j="\"$_lp\""; fi
+      else _lp_j="\"$(_json_esc "$_lp")\""; fi
 
       # Reason JSON value
       if [ -z "$_rs_j" ]; then _rs_jv="null"; else _rs_jv="\"$_rs_j\""; fi
@@ -856,7 +878,7 @@ if [ "$DRY_RUN" = "false" ]; then
       else _gates_json="$_gates_json, $_ge"; fi
     done
 
-    _pe='{"project_dir": "'"$_pd"'", "language": "'"$_lang"'", "gates": {'"$_gates_json"'}}'
+    _pe='{"project_dir": "'"$(_json_esc "$_pd")"'", "language": "'"$_lang"'", "gates": {'"$_gates_json"'}}'
     if [ "$_pfirst" = "true" ]; then _proj_arr="$_pe"; _pfirst=false
     else _proj_arr="$_proj_arr, $_pe"; fi
   done < "$WORK/projects"
@@ -865,7 +887,7 @@ if [ "$DRY_RUN" = "false" ]; then
 {
   "validator_version": "$VALIDATOR_VERSION",
   "timestamp": "$_ts",
-  "invocation_dir": "$INVOCATION_DIR",
+  "invocation_dir": "$(_json_esc "$INVOCATION_DIR")",
   "overall_pass": $_op,
   "projects": [$_proj_arr],
   "summary": {

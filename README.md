@@ -145,7 +145,7 @@ Optional. Place it in the invocation directory. Plain `KEY=VALUE` INI format, `#
 | `VERBOSE` | `false` | Same as `--verbose` |
 | `FAIL_FAST` | `false` | Reserved and ignored |
 
-CLI flags always win over config values.
+CLI flags always win over config values. A threshold that is not an integer 0–100 is a script error (exit 2).
 
 ## Testing
 
@@ -185,7 +185,7 @@ Generated `validation-report.json` and `validation-logs/` inside `fixtures/` are
 
 ## Status and known gaps
 
-- `./tests/run.sh` passes: 40 assertions, 0 failures, on macOS with PowerShell 7.6 installed. Group 11 compares `validate.ps1` against `validate.sh` on every fixture (exit code, `overall_pass`, gate statuses, summary counts). It shows PENDING when `pwsh` is not on the `PATH`.
+- `./tests/run.sh` passes: 45 assertions, 0 failures, on macOS with PowerShell 7.6 installed. Group 11 compares `validate.ps1` against `validate.sh` on every fixture (exit code, `overall_pass`, gate statuses, summary counts). It shows PENDING when `pwsh` is not on the `PATH`.
 - `validate.ps1` has only been run under PowerShell 7 on macOS. It avoids 7-only syntax, but Windows PowerShell 5.1 and `validate.bat` have not been exercised.
 - `fixtures/*/node_modules` is committed (about 33,000 files) so the JS fixtures run offline. Consider vendoring less.
 - `fixtures/monorepo/frontend/.eslintrc.json` is a legacy config that ESLint 10 ignores. It has no effect today because that fixture does not install ESLint.

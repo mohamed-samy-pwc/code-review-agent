@@ -65,6 +65,15 @@ $CoverageThreshold = 80
 $LangThresholds = @{}
 $VerboseMode = $VerboseOutput.IsPresent
 
+# Thresholds must be integers 0-100; anything else is a script error (exit 2).
+function ConvertTo-Threshold { param([string]$Key, [string]$Value)
+    if ($Value -notmatch '^\d+$' -or [int]$Value -gt 100) {
+        [Console]::Error.WriteLine("Invalid value for $Key in .validation.conf: `"$Value`" (expected integer 0-100)")
+        exit 2
+    }
+    return [int]$Value
+}
+
 function Read-Conf {
     if (-not (Test-Path '.validation.conf')) { return }
     Get-Content '.validation.conf' | ForEach-Object {
@@ -74,9 +83,9 @@ function Read-Conf {
             $k = $Matches[1].Trim()
             $v = ($Matches[2] -replace '#.*$','').Trim()
             switch -Regex ($k) {
-                '^COVERAGE_THRESHOLD$'      { $script:CoverageThreshold = [int]$v }
+                '^COVERAGE_THRESHOLD$'      { $script:CoverageThreshold = ConvertTo-Threshold $k $v }
                 '^VERBOSE$'                 { if ($v -eq 'true') { $script:VerboseMode = $true } }
-                '^COVERAGE_THRESHOLD_(.+)$' { $script:LangThresholds[$Matches[1].ToLower()] = [int]$v }
+                '^COVERAGE_THRESHOLD_(.+)$' { $lang = $Matches[1].ToLower(); $script:LangThresholds[$lang] = ConvertTo-Threshold $k $v }
             }
         }
     }

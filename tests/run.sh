@@ -374,6 +374,51 @@ fi
 printf '\n'
 
 # ==========================================================================
+# GROUP 12: hostile input — JSON escaping and config injection
+# ==========================================================================
+printf '── Group 12: JSON escaping and config injection ───────────\n'
+
+# A directory name containing a double quote and a backslash must not break the report.
+WEIRD_ROOT="$(mktemp -d)"
+WEIRD_DIR="$WEIRD_ROOT/we\"ir\\d"
+mkdir -p "$WEIRD_DIR"
+cp -R "$FIXTURES/python-passing/." "$WEIRD_DIR/"
+rm -f "$WEIRD_DIR/validation-report.json"
+exit_code=0
+(cd "$WEIRD_DIR" && sh "$VALIDATE_SH") > /dev/null 2>&1 || exit_code=$?
+assert_exit_code "0" "$exit_code" "validate.sh runs in a directory whose name has quote and backslash"
+if grep -qF '"invocation_dir": "'"$WEIRD_ROOT"'/we\"ir\\d"' "$WEIRD_DIR/validation-report.json" 2>/dev/null; then
+  _color "$GREEN"; printf '  PASS'; _color "$RESET"; printf ' invocation_dir is JSON-escaped\n'
+  PASS_COUNT=$((PASS_COUNT + 1))
+else
+  _color "$RED"; printf '  FAIL'; _color "$RESET"; printf ' invocation_dir is not JSON-escaped\n'
+  FAIL_COUNT=$((FAIL_COUNT + 1))
+fi
+rm -rf "$WEIRD_ROOT"
+
+# A shell payload in .validation.conf must not execute; the script exits 2 (script error).
+INJECT_MARK="$(mktemp -u)"
+printf 'COVERAGE_THRESHOLD_TYPESCRIPT=1; touch %s\n' "$INJECT_MARK" > "$FIXTURES/js-ts-passing/.validation.conf"
+exit_code=$(run_validate "$FIXTURES/js-ts-passing")
+rm -f "$FIXTURES/js-ts-passing/.validation.conf"
+assert_exit_code "2" "$exit_code" "non-numeric threshold in .validation.conf exits 2"
+assert_file_not_exists "$INJECT_MARK" "config value is never executed"
+rm -f "$INJECT_MARK"
+
+# validate.ps1 must agree on the bad-config exit code.
+if command -v pwsh >/dev/null 2>&1; then
+  printf 'COVERAGE_THRESHOLD_TYPESCRIPT=1; touch x\n' > "$FIXTURES/js-ts-passing/.validation.conf"
+  ps_exit=0
+  (cd "$FIXTURES/js-ts-passing" && NO_COLOR=1 pwsh -NoProfile -File "$REPO_ROOT/validate.ps1") > /dev/null 2>&1 || ps_exit=$?
+  rm -f "$FIXTURES/js-ts-passing/.validation.conf" "$FIXTURES/js-ts-passing/x"
+  assert_exit_code "2" "$ps_exit" "validate.ps1: non-numeric threshold in .validation.conf exits 2"
+else
+  pending "validate.ps1 bad-config exit code (pwsh not installed)"
+fi
+
+printf '\n'
+
+# ==========================================================================
 # SUMMARY
 # ==========================================================================
 printf '══════════════════════════════════════════════════════════\n'
