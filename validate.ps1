@@ -125,6 +125,7 @@ function New-GateState {
     $script:Gate = [pscustomobject]@{
         Status = 'SKIPPED'; Reason = ''; ExitCode = $null; LogFile = $null
         Last = $null; CovContent = $null; CovUnsupported = $false; NoCoverage = $false
+        Detail = ''; LineCovPct = $null; Threshold = $null
         Proj = ''; Lang = ''; Name = ''
     }
 }
@@ -174,34 +175,79 @@ function Invoke-GateRun { param([string]$FailReason, [string]$Dir, [string]$Exe,
     Complete-Gate $FailReason
 }
 
+# Test Gate precondition (Hard Gate, ADR-0001): no test files is a FAIL.
+function Set-GateNoTests {
+    $script:Gate.Status   = 'FAIL'
+    $script:Gate.ExitCode = 1
+    $script:Gate.Reason   = 'No test files detected — a project must have tests to be reviewable'
+    $script:Gate.LogFile  = Save-Sidecar $script:Gate.Proj $script:Gate.Lang $script:Gate.Name $script:Gate.Reason
+    $script:Gate.Detail   = $script:Gate.Reason
+}
+
+# Coverage Gate: parse the output captured by the test Gate (no re-run) and
+# compare line coverage with the Language's threshold.
+function Set-GateCoverage { param([string]$Dir)
+    $projectDir = $script:Gate.Proj; $lang = $script:Gate.Lang
+    $thr = Get-Threshold $lang
+    $script:Gate.Threshold = $thr
+    $script:Gate.ExitCode  = $null
+    if ($DryRun) {
+        Write-Host '[DRY RUN] coverage parse (no re-run)'
+        Set-GateSkip 'dry-run mode'; $script:Gate.Detail = $script:Gate.Reason; return
+    }
+    $covFile = Join-Path $WorkDir "COV_${projectDir}_${lang}.txt"
+    if (-not (Test-Path $covFile)) {
+        Set-GateSkip 'no coverage data (test gate skipped or failed)'; $script:Gate.Detail = $script:Gate.Reason; return
+    }
+    $covContent = Get-Content $covFile -Raw
+    $script:Gate.CovContent = $covContent
+    $lpct = & "Recipe-$lang" 'coverage' $Dir
+    if ($script:Gate.CovUnsupported) {
+        Set-GateSkip "coverage parsing not implemented for $lang"; $script:Gate.Detail = $script:Gate.Reason; return
+    }
+    $script:Gate.LineCovPct = $lpct
+    if ($null -eq $lpct) {
+        Set-GateSkip 'coverage output unparseable'
+        Set-Content (Join-Path $LogDir "${projectDir}-${lang}-coverage-raw.log") $covContent -Encoding UTF8
+        $script:Gate.LogFile = "validation-logs/${projectDir}-${lang}-coverage-raw.log"
+    } elseif ($lpct -ge $thr) {
+        $script:Gate.Status = 'PASS'; $script:Gate.Reason = ''
+    } else {
+        $script:Gate.Status  = 'FAIL'
+        $script:Gate.Reason  = "${lpct}% < ${thr}% threshold"
+        $script:Gate.LogFile = Save-Sidecar $projectDir $lang 'coverage' $script:Gate.Reason
+    }
+}
+
 function Invoke-Gate { param([string]$Name, $P)
-    $pd = $P.Dir; $abs = $P.AbsDir; $lang = $P.Lang
-    Write-GateLine $pd $lang $Name 'RUNNING'
+    $projectDir = $P.Dir; $abs = $P.AbsDir; $lang = $P.Lang
+    Write-GateLine $projectDir $lang $Name 'RUNNING'
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     New-GateState
-    $script:Gate.Proj = $pd; $script:Gate.Lang = $lang; $script:Gate.Name = $Name
+    $script:Gate.Proj = $projectDir; $script:Gate.Lang = $lang; $script:Gate.Name = $Name
     if ($Name -eq 'build') { $script:Gate.Reason = 'no build command applies' }
 
-    if ($Name -eq 'test' -and -not (& "Recipe-$lang" 'has_tests' $abs)) {
-        $rs = 'No test files detected — a project must have tests to be reviewable'
-        $lf = Save-Sidecar $pd $lang 'test' $rs
-        $sw.Stop()
-        Write-GateLine $pd $lang 'test' 'FAIL' $rs
-        Set-GateResult $pd $lang 'test' 'FAIL' $rs 1 $sw.Elapsed.TotalSeconds $lf
-        return
-    }
-
-    & "Recipe-$lang" $Name $abs
-
-    # Coverage is parsed later from the test Gate's captured output.
-    if ($Name -eq 'test' -and $script:Gate.Last -and -not $script:Gate.NoCoverage -and -not $DryRun) {
-        $covFile = Join-Path $WorkDir "COV_${pd}_${lang}.txt"
-        Set-Content -Path $covFile -Value $script:Gate.Last.Output -Encoding UTF8
+    if ($Name -eq 'coverage') {
+        Set-GateCoverage $abs
+    } elseif ($Name -eq 'test' -and -not (& "Recipe-$lang" 'has_tests' $abs)) {
+        Set-GateNoTests
+    } else {
+        & "Recipe-$lang" $Name $abs
+        # Coverage is parsed later from the test Gate's captured output.
+        if ($Name -eq 'test' -and $script:Gate.Last -and -not $script:Gate.NoCoverage -and -not $DryRun) {
+            $covFile = Join-Path $WorkDir "COV_${projectDir}_${lang}.txt"
+            Set-Content -Path $covFile -Value $script:Gate.Last.Output -Encoding UTF8
+        }
     }
 
     $sw.Stop()
-    Write-GateLine $pd $lang $Name $script:Gate.Status "($([Math]::Round($sw.Elapsed.TotalSeconds,1))s)"
-    Set-GateResult $pd $lang $Name $script:Gate.Status $script:Gate.Reason $script:Gate.ExitCode $sw.Elapsed.TotalSeconds $script:Gate.LogFile
+    $secs = [Math]::Round($sw.Elapsed.TotalSeconds, 1)
+    $detail = if ($script:Gate.Detail) { $script:Gate.Detail }
+              elseif ($script:Gate.LineCovPct) { "($($script:Gate.LineCovPct)% vs $($script:Gate.Threshold)%, ${secs}s)" }
+              else { "(${secs}s)" }
+    Write-GateLine $projectDir $lang $Name $script:Gate.Status $detail
+    Set-GateResult $projectDir $lang $Name $script:Gate.Status $script:Gate.Reason $script:Gate.ExitCode `
+        $sw.Elapsed.TotalSeconds $script:Gate.LogFile $script:Gate.LineCovPct $script:Gate.Threshold
 }
 
 function Recipe-typescript { param([string]$Req, [string]$Dir)
@@ -634,7 +680,8 @@ function Set-GateResult {
     param([string]$Proj, [string]$Lang, [string]$Gate, [string]$Status,
           [string]$Reason = '', [object]$ExitCode = $null, [double]$Duration = 0,
           [object]$LogFile = $null, [object]$LineCovPct = $null,
-          [object]$Threshold = $null)
+          [object]$Threshold = $null, [object]$BranchCovPct = $null,
+          [object]$FunctionCovPct = $null)
     # One immutable-by-convention Gate Result, written once; read only by
     # Write-ValidationReport and the summary table.
     $GateResults["$Proj|$Lang|$Gate"] = [pscustomobject]@{
@@ -644,6 +691,8 @@ function Set-GateResult {
         Duration    = [Math]::Round($Duration, 1)
         LogFile     = $LogFile
         LineCovPct  = $LineCovPct
+        BranchCovPct   = $BranchCovPct
+        FunctionCovPct = $FunctionCovPct
         Threshold   = $Threshold
     }
 }
@@ -700,62 +749,6 @@ function Test-PythonModule { param([string]$Py, [string[]]$ModuleArgs)
 }
 
 # ---------------------------------------------------------------------------
-# Coverage Gate (parses the output captured by the test Gate — no re-run)
-# ---------------------------------------------------------------------------
-function Invoke-CoverageGate { param($P)
-    $pd = $P.Dir; $abs = $P.AbsDir; $lang = $P.Lang
-    Write-GateLine $pd $lang 'coverage' 'RUNNING'
-    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $st = 'SKIPPED'; $rs = ''; $ex = $null; $lf = $null; $lpct = $null
-    $thr = Get-Threshold $lang
-
-    if ($DryRun) {
-        Write-Host '[DRY RUN] coverage parse (no re-run)'
-        $sw.Stop(); Write-GateLine $pd $lang 'coverage' 'SKIPPED' 'dry-run mode'
-        Set-GateResult $pd $lang 'coverage' 'SKIPPED' 'dry-run mode' $null $sw.Elapsed.TotalSeconds $null $null $thr
-        return
-    }
-
-    $covFile = Join-Path $WorkDir "COV_${pd}_${lang}.txt"
-    if (-not (Test-Path $covFile)) {
-        $st='SKIPPED'; $rs='no coverage data (test gate skipped or failed)'
-        $sw.Stop(); Write-GateLine $pd $lang 'coverage' $st $rs
-        Set-GateResult $pd $lang 'coverage' $st $rs $null $sw.Elapsed.TotalSeconds $null $null $thr
-        return
-    }
-
-    $covContent = Get-Content $covFile -Raw
-
-    # Parse line coverage with the Language Recipe
-    New-GateState
-    $script:Gate.CovContent = $covContent
-    $lpct = & "Recipe-$lang" 'coverage' $abs
-    if ($script:Gate.CovUnsupported) {
-        $st='SKIPPED'; $rs="coverage parsing not implemented for $lang"
-        $sw.Stop(); Write-GateLine $pd $lang 'coverage' $st $rs
-        Set-GateResult $pd $lang 'coverage' $st $rs $null $sw.Elapsed.TotalSeconds $null $null $thr
-        return
-    }
-
-    if ($null -eq $lpct) {
-        $st='SKIPPED'; $rs='coverage output unparseable'
-        $rawLog = Join-Path $LogDir "${pd}-${lang}-coverage-raw.log"
-        Set-Content $rawLog $covContent -Encoding UTF8
-        $lf = "validation-logs/${pd}-${lang}-coverage-raw.log"
-    } elseif ($lpct -ge $thr) {
-        $st='PASS'; $rs=''
-    } else {
-        $st='FAIL'; $rs="${lpct}% < ${thr}% threshold"
-        $lf = Save-Sidecar $pd $lang 'coverage' $rs
-    }
-
-    $sw.Stop()
-    $detail = if ($lpct) { "(${lpct}% vs ${thr}%, $([Math]::Round($sw.Elapsed.TotalSeconds,1))s)" } else { "($([Math]::Round($sw.Elapsed.TotalSeconds,1))s)" }
-    Write-GateLine $pd $lang 'coverage' $st $detail
-    Set-GateResult $pd $lang 'coverage' $st $rs $ex $sw.Elapsed.TotalSeconds $lf $lpct $thr
-}
-
-# ---------------------------------------------------------------------------
 # Run all gates
 # ---------------------------------------------------------------------------
 foreach ($proj in $Projects) {
@@ -763,38 +756,41 @@ foreach ($proj in $Projects) {
     Invoke-Gate 'build' $proj
     Invoke-Gate 'test'  $proj
     Invoke-Gate 'lint'  $proj
-    Invoke-CoverageGate $proj
+    Invoke-Gate 'coverage' $proj
     Write-Host ''
 }
 
 # ---------------------------------------------------------------------------
-# Compute overall result
+# Totals — read from the Gate Results; used by the report and the summary
 # ---------------------------------------------------------------------------
-$overallPass = $true
-$totalProjects = $Projects.Count
-$totalGates = 0; $passed = 0; $failed = 0; $skipped = 0
-
-foreach ($key in $GateResults.Keys) {
-    $totalGates++
-    switch ($GateResults[$key].Status) {
-        'PASS'    { $passed++ }
-        'FAIL'    { $failed++; $overallPass = $false }
-        'SKIPPED' { $skipped++ }
+function Get-GateTotals {
+    $t = [pscustomobject]@{ Projects = $Projects.Count; Gates = 0; Passed = 0; Failed = 0; Skipped = 0; OverallPass = $true }
+    foreach ($key in $GateResults.Keys) {
+        $t.Gates++
+        switch ($GateResults[$key].Status) {
+            'PASS'    { $t.Passed++ }
+            'FAIL'    { $t.Failed++; $t.OverallPass = $false }
+            'SKIPPED' { $t.Skipped++ }
+        }
     }
+    return $t
 }
+$totals = Get-GateTotals
+$overallPass = $totals.OverallPass
+$failed = $totals.Failed
 
 # ---------------------------------------------------------------------------
 # Validation Report writer — owns the pinned schema, field order and null
-# handling (ADR-0002). Reads Gate Results; totals are computed above.
+# handling (ADR-0002). Reads Gate Results and the totals.
 # ---------------------------------------------------------------------------
 function Write-ValidationReport {
     $ts = (Get-Date -AsUTC).ToString('yyyy-MM-ddTHH:mm:ssZ')
 
     $projectsArr = $Projects | ForEach-Object {
-        $pd = $_.Dir; $lang = $_.Lang
+        $projectDir = $_.Dir; $lang = $_.Lang
         $gates = [ordered]@{}
         foreach ($gate in @('build','test','lint','coverage')) {
-            $r = $GateResults["$pd|$lang|$gate"]
+            $r = $GateResults["$projectDir|$lang|$gate"]
             $gObj = [ordered]@{
                 status           = $r.Status
                 duration_seconds = $r.Duration
@@ -804,13 +800,13 @@ function Write-ValidationReport {
             }
             if ($gate -eq 'coverage') {
                 $gObj['line_coverage_pct']     = $(if ($null -ne $r.LineCovPct -and $r.LineCovPct -eq [math]::Floor($r.LineCovPct)) { [int]$r.LineCovPct } else { $r.LineCovPct })
-                $gObj['branch_coverage_pct']   = $null
-                $gObj['function_coverage_pct'] = $null
+                $gObj['branch_coverage_pct']   = $r.BranchCovPct
+                $gObj['function_coverage_pct'] = $r.FunctionCovPct
                 $gObj['threshold_pct']         = $r.Threshold
             }
             $gates[$gate] = $gObj
         }
-        [ordered]@{ project_dir = $pd; language = $lang; gates = $gates }
+        [ordered]@{ project_dir = $projectDir; language = $lang; gates = $gates }
     }
 
     $report = [ordered]@{
@@ -820,11 +816,11 @@ function Write-ValidationReport {
         overall_pass      = $overallPass
         projects          = @($projectsArr)
         summary           = [ordered]@{
-            total_projects = $totalProjects
-            total_gates_run = $totalGates
-            passed  = $passed
-            failed  = $failed
-            skipped = $skipped
+            total_projects = $totals.Projects
+            total_gates_run = $totals.Gates
+            passed  = $totals.Passed
+            failed  = $totals.Failed
+            skipped = $totals.Skipped
         }
     }
 
@@ -842,11 +838,11 @@ Write-Host ('│ {0,-12} │ {1,-10} │ {2,-9} │ {3,-8} │ {4,-42} │' -f '
 Write-Host '├──────────────┼────────────┼───────────┼──────────┼────────────────────────────────────────────┤'
 
 foreach ($proj in $Projects) {
-    $pd = $proj.Dir; $lang = $proj.Lang
+    $projectDir = $proj.Dir; $lang = $proj.Lang
     foreach ($gate in @('build','test','lint','coverage')) {
-        $r = $GateResults["$pd|$lang|$gate"]
+        $r = $GateResults["$projectDir|$lang|$gate"]
         $detail = if ($r.Reason) { $r.Reason.Substring(0, [Math]::Min(42, $r.Reason.Length)) } else { '' }
-        Write-Host ('│ {0,-12} │ {1,-10} │ {2,-9} │ {3,-8} │ {4,-42} │' -f $pd, $lang, $gate, $r.Status, $detail)
+        Write-Host ('│ {0,-12} │ {1,-10} │ {2,-9} │ {3,-8} │ {4,-42} │' -f $projectDir, $lang, $gate, $r.Status, $detail)
     }
 }
 
