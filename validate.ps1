@@ -178,14 +178,16 @@ Write-Host ''
 # ---------------------------------------------------------------------------
 # State tracking
 # ---------------------------------------------------------------------------
-$GateResults = @{}  # key: "proj|lang|gate" → hashtable
+$GateResults = @{}  # key: "proj|lang|gate" → Gate Result record ([pscustomobject])
 
 function Set-GateResult {
     param([string]$Proj, [string]$Lang, [string]$Gate, [string]$Status,
           [string]$Reason = '', [object]$ExitCode = $null, [double]$Duration = 0,
           [string]$LogFile = $null, [object]$LineCovPct = $null,
           [object]$Threshold = $null)
-    $GateResults["$Proj|$Lang|$Gate"] = @{
+    # One immutable-by-convention Gate Result, written once; read only by
+    # Write-ValidationReport and the summary table.
+    $GateResults["$Proj|$Lang|$Gate"] = [pscustomobject]@{
         Status      = $Status
         Reason      = $Reason
         ExitCode    = $ExitCode
@@ -586,9 +588,10 @@ foreach ($key in $GateResults.Keys) {
 }
 
 # ---------------------------------------------------------------------------
-# JSON report (uses ConvertTo-Json for correctness — ADR-0002)
+# Validation Report writer — owns the pinned schema, field order and null
+# handling (ADR-0002). Reads Gate Results; totals are computed above.
 # ---------------------------------------------------------------------------
-if (-not $DryRun) {
+function Write-ValidationReport {
     $ts = (Get-Date -AsUTC).ToString('yyyy-MM-ddTHH:mm:ssZ')
 
     $projectsArr = $Projects | ForEach-Object {
@@ -631,6 +634,8 @@ if (-not $DryRun) {
 
     $report | ConvertTo-Json -Depth 10 | Set-Content -Path $ReportFile -Encoding UTF8
 }
+
+if (-not $DryRun) { Write-ValidationReport }
 
 # ---------------------------------------------------------------------------
 # Summary table
