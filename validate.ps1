@@ -494,7 +494,7 @@ function Recipe-ruby { param([string]$Req, [string]$Dir)
         'build' {
             if ((Find-Cmd 'bundle') -and (Test-Path "$Dir/Rakefile") -and ((Get-Content "$Dir/Rakefile" -Raw) -match 'build')) {
                 Invoke-GateRun 'rake build failed' $Dir 'bundle' @('exec','rake','build')
-            } else { Set-GateSkip 'no build step detected' }
+            } else { Set-GateSkip 'no build command detected' }
         }
         'test' {
             if (Find-Cmd 'bundle') {

@@ -528,7 +528,7 @@ _recipe_ruby() {
          grep -q 'build' "$_d/Rakefile" 2>/dev/null; then
         gate_run "rake build failed" "$_d" bundle exec rake build
       else
-        gate_skip "no build step detected"
+        gate_skip "no build command detected"
       fi ;;
     test)
       if command -v bundle >/dev/null 2>&1; then
