@@ -344,7 +344,7 @@ printf '── Group 11: validate.ps1 parity with validate.sh ──────
 
 # Reduce a report to the fields that must match across both scripts.
 _report_signature() {
-  grep -o '"\(validator_version\|overall_pass\|status\|total_projects\|total_gates_run\|passed\|failed\|skipped\)" *: *[^,}]*' "$1" | tr -d ' \n'
+  grep -o '"\(validator_version\|overall_pass\|status\|total_projects\|total_gates_run\|passed\|failed\|skipped\|reason\|exit_code\|line_coverage_pct\|threshold_pct\)" *: *[^,}]*' "$1" | tr -d ' \n'
 }
 
 if command -v pwsh >/dev/null 2>&1; then
@@ -404,6 +404,11 @@ rm -f "$FIXTURES/js-ts-passing/.validation.conf"
 assert_exit_code "2" "$exit_code" "non-numeric threshold in .validation.conf exits 2"
 assert_file_not_exists "$INJECT_MARK" "config value is never executed"
 rm -f "$INJECT_MARK"
+
+# A caller that forces ANSI colour (FORCE_COLOR) must not corrupt parsed tool output.
+exit_code=$(FORCE_COLOR=3 run_validate "$FIXTURES/js-ts-low-coverage")
+assert_exit_code "1" "$exit_code" "FORCE_COLOR=3 does not break coverage parsing (low-coverage still exits 1)"
+assert_json_field "$FIXTURES/js-ts-low-coverage/validation-report.json" '"line_coverage_pct"' "20" "line coverage parsed cleanly under FORCE_COLOR"
 
 # validate.ps1 must agree on the bad-config exit code.
 if command -v pwsh >/dev/null 2>&1; then

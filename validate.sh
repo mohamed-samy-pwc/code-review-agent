@@ -39,6 +39,11 @@ if [ -z "${NO_COLOR:-}" ] && [ -t 1 ]; then
   C_YELLOW='\033[0;33m'; C_CYAN='\033[0;36m'; C_RESET='\033[0m'
 fi
 
+# Tool output is captured and parsed (coverage, test counts), so child tools must
+# not emit ANSI colour even if the caller's environment forces it.
+FORCE_COLOR=0; CLICOLOR_FORCE=0; NO_COLOR=1
+export FORCE_COLOR CLICOLOR_FORCE NO_COLOR
+
 # ---------------------------------------------------------------------------
 # Temp dir — always cleaned up
 # ---------------------------------------------------------------------------

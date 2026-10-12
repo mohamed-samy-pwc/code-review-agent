@@ -1,3 +1,8 @@
 fixtures/**/validation-report.json
 fixtures/**/validation-logs/
 .venv/
+fixtures/**/.coverage
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/

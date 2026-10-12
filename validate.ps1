@@ -65,6 +65,11 @@ $CoverageThreshold = 80
 $LangThresholds = @{}
 $VerboseMode = $VerboseOutput.IsPresent
 
+# Tool output is captured and parsed, so child tools must not emit ANSI colour
+# even if the caller's environment forces it.
+$env:FORCE_COLOR = '0'
+$env:CLICOLOR_FORCE = '0'
+
 # Thresholds must be integers 0-100; anything else is a script error (exit 2).
 function ConvertTo-Threshold { param([string]$Key, [string]$Value)
     if ($Value -notmatch '^\d+$' -or [int]$Value -gt 100) {
@@ -289,7 +294,7 @@ function Invoke-BuildGate { param($P)
             } elseif (Test-Path "$abs/node_modules/.bin/tsc") {
                 $r = Invoke-Tool $abs @('--noEmit') "$abs/node_modules/.bin/tsc"
                 if ($r.ExitCode -eq 0) { $st='PASS'; $rs=''; $ex=0 }
-                else { $st='FAIL'; $ex=$r.ExitCode; $rs="tsc failed"; $lf=Save-Sidecar $pd $lang 'build' $r.Output }
+                else { $st='FAIL'; $ex=$r.ExitCode; $rs="tsc failed (exit $($r.ExitCode))"; $lf=Save-Sidecar $pd $lang 'build' $r.Output }
             } else { $st='SKIPPED'; $rs='no build script and tsc not found' }
         }
         'python' {
@@ -599,7 +604,7 @@ if (-not $DryRun) {
                 log_file         = $r.LogFile
             }
             if ($gate -eq 'coverage') {
-                $gObj['line_coverage_pct']     = $r.LineCovPct
+                $gObj['line_coverage_pct']     = $(if ($null -ne $r.LineCovPct -and $r.LineCovPct -eq [math]::Floor($r.LineCovPct)) { [int]$r.LineCovPct } else { $r.LineCovPct })
                 $gObj['branch_coverage_pct']   = $null
                 $gObj['function_coverage_pct'] = $null
                 $gObj['threshold_pct']         = $r.Threshold
