@@ -123,7 +123,8 @@ printf 'Scanning: %s\n' "$INVOCATION_DIR"
 # (or gate_exec + gate_finish when a Gate runs more than one command).
 # `coverage` prints the line-coverage percentage (nothing if unparseable).
 # ---------------------------------------------------------------------------
-RECIPE_LANGS="typescript python"
+RECIPE_LANGS="typescript python go rust swift cpp"
+_try_recipe() { "_recipe_$1" detect "$_d" && printf '%s' "$1"; }
 _is_recipe() { case " $RECIPE_LANGS " in *" $1 "*) return 0 ;; esac; return 1; }
 
 _recipe_typescript() {
@@ -237,6 +238,145 @@ _recipe_python() {
   esac
 }
 
+_recipe_go() {
+  _req="$1"; _d="$2"
+  case "$_req" in
+    # go.mod is canonical — *.go files may appear in vendor/ of non-Go projects
+    detect)    [ -f "$_d/go.mod" ] ;;
+    has_tests) find "$_d" -name '*_test.go' 2>/dev/null | grep -q . ;;
+    build)
+      if command -v go >/dev/null 2>&1; then
+        gate_run "go build failed" "(cd '$_d' && go build ./...)"
+      else
+        gate_skip "toolchain not installed (go not found)"
+      fi ;;
+    test)
+      if command -v go >/dev/null 2>&1; then
+        gate_run "go test failed" "(cd '$_d' && go test -short -coverprofile='$WORK/cov.out' ./... && \
+          go tool cover -func='$WORK/cov.out')"
+      else
+        gate_skip "toolchain not installed (go not found)"
+      fi ;;
+    lint)
+      # go vet is always available when Go is installed
+      if command -v go >/dev/null 2>&1; then
+        if command -v golangci-lint >/dev/null 2>&1; then
+          gate_run "golangci-lint failed" "(cd '$_d' && golangci-lint run)"
+        else
+          gate_run "go vet failed" "(cd '$_d' && go vet ./...)"
+        fi
+      else
+        gate_skip "toolchain not installed (go not found)"
+      fi ;;
+    coverage)
+      # total:  (statements)   77.8%
+      grep '^total:' "$GATE_COVFILE" 2>/dev/null | awk '{print $NF}' | sed 's/%//' | head -1
+      return 0 ;;
+  esac
+}
+
+_recipe_rust() {
+  _req="$1"; _d="$2"
+  case "$_req" in
+    detect)    [ -f "$_d/Cargo.toml" ] ;;
+    has_tests) grep -r '#\[cfg(test)\]' "$_d/src" >/dev/null 2>&1 || [ -d "$_d/tests" ] ;;
+    build)
+      if command -v cargo >/dev/null 2>&1; then
+        gate_run "cargo build failed" "(cd '$_d' && cargo build)"
+      else
+        gate_skip "toolchain not installed (cargo not found)"
+      fi ;;
+    test)
+      if command -v cargo >/dev/null 2>&1; then
+        gate_run "cargo test failed" "(cd '$_d' && cargo test --lib)"
+      else
+        gate_skip "toolchain not installed (cargo not found)"
+      fi ;;
+    lint)
+      if command -v cargo >/dev/null 2>&1; then
+        gate_run "clippy failed" "(cd '$_d' && cargo clippy -- -D warnings)"
+      else
+        gate_skip "toolchain not installed (cargo not found)"
+      fi ;;
+    coverage)
+      _lpct=$(grep 'TOTAL' "$GATE_COVFILE" 2>/dev/null | awk '{print $NF}' | sed 's/%//' | head -1)
+      [ -z "$_lpct" ] && _lpct=$(grep -o '[0-9]*\.[0-9]*% coverage' "$GATE_COVFILE" 2>/dev/null | \
+        sed 's/% coverage//' | head -1)
+      printf '%s' "$_lpct"
+      return 0 ;;
+  esac
+}
+
+_recipe_swift() {
+  _req="$1"; _d="$2"
+  case "$_req" in
+    detect)
+      [ -f "$_d/Package.swift" ] || ls -d "$_d"/*.xcodeproj >/dev/null 2>&1 ;;
+    has_tests) find "$_d" -name '*Tests.swift' 2>/dev/null | grep -q . ;;
+    build)
+      if command -v swift >/dev/null 2>&1; then
+        gate_run "swift build failed" "(cd '$_d' && swift build)"
+      else
+        gate_skip "toolchain not installed (swift not found)"
+      fi ;;
+    test)
+      if command -v swift >/dev/null 2>&1; then
+        gate_run "swift test failed" "(cd '$_d' && swift test --enable-code-coverage)"
+      else
+        gate_skip "toolchain not installed (swift not found)"
+      fi ;;
+    lint)
+      if command -v swiftlint >/dev/null 2>&1; then
+        gate_run "swiftlint failed" "(cd '$_d' && swiftlint)"
+      else
+        gate_skip "linter not installed (swiftlint not found)"
+      fi ;;
+    coverage) return 1 ;;
+  esac
+}
+
+_recipe_cpp() {
+  _req="$1"; _d="$2"
+  case "$_req" in
+    detect)
+      [ -f "$_d/CMakeLists.txt" ] || \
+        { [ -f "$_d/Makefile" ] && \
+          { ls "$_d"/*.c >/dev/null 2>&1 || ls "$_d"/*.cpp >/dev/null 2>&1; }; } ;;
+    has_tests)
+      find "$_d" \( -name '*_test.c' -o -name '*_test.cpp' \) 2>/dev/null | grep -q . || \
+        [ -d "$_d/test" ] || [ -d "$_d/tests" ] ;;
+    build)
+      if [ -f "$_d/CMakeLists.txt" ] && command -v cmake >/dev/null 2>&1; then
+        gate_run "cmake build failed" \
+          "(cd '$_d' && cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build)"
+      elif [ -f "$_d/Makefile" ] && command -v make >/dev/null 2>&1; then
+        gate_run "make failed" "(cd '$_d' && make)"
+      else
+        gate_skip "toolchain not installed"
+      fi ;;
+    test)
+      if command -v ctest >/dev/null 2>&1; then
+        gate_no_coverage
+        gate_run "ctest failed" "(cd '$_d' && ctest --test-dir build)"
+      else
+        gate_skip "toolchain not installed (ctest not found)"
+      fi ;;
+    lint)
+      if command -v clang-tidy >/dev/null 2>&1; then
+        _cfiles=$(find "$_d" -maxdepth 4 \( -name '*.cpp' -o -name '*.c' \) \
+          ! -path '*/build/*' 2>/dev/null | head -100 | tr '\n' ' ')
+        if [ -n "$_cfiles" ]; then
+          gate_run "clang-tidy failed" "(cd '$_d' && clang-tidy $_cfiles --)"
+        else
+          gate_skip "no .c/.cpp source files found"
+        fi
+      else
+        gate_skip "linter not installed (clang-tidy not found)"
+      fi ;;
+    coverage) return 1 ;;
+  esac
+}
+
 # ---------------------------------------------------------------------------
 # Gate runner — owns timing, status classification, Sidecar Log writing,
 # dry-run and verbose handling, and the Hard Gate rule that a Project with no
@@ -256,6 +396,9 @@ gate_exec() {
   else eval "$*" > "$WORK/out" 2>&1; GATE_EXIT=$?; fi
 }
 
+# The test run produced no coverage output to parse later.
+gate_no_coverage() { GATE_COV=false; }
+
 gate_output_matches() { grep -qE "$1" "$WORK/out" 2>/dev/null; }
 
 # Classify the last gate_exec: PASS on exit 0, otherwise FAIL with the given
@@ -272,7 +415,7 @@ gate_run() { gate_exec "$2"; gate_finish "$1"; }
 
 _run_gate() {
   _gate="$1"; _pd="$2"; _abs="$3"; _lang="$4"
-  GATE_ST=SKIPPED; GATE_RS=""; GATE_EX=null; GATE_LOG=null; GATE_RAN=false
+  GATE_ST=SKIPPED; GATE_RS=""; GATE_EX=null; GATE_LOG=null; GATE_RAN=false; GATE_COV=true
   [ "$_gate" = "build" ] && GATE_RS="no build command applies"
   _t0=$(date +%s)
   _status_line "$_pd" "$_lang" "$_gate" "RUNNING"
@@ -291,7 +434,7 @@ _run_gate() {
   "_recipe_$_lang" "$_gate" "$_abs"
 
   # Coverage is parsed later from the test Gate's captured output.
-  if [ "$_gate" = "test" ] && [ "$GATE_RAN" = "true" ] && [ "$DRY_RUN" != "true" ]; then
+  if [ "$_gate" = "test" ] && [ "$GATE_RAN" = "true" ] && [ "$GATE_COV" = "true" ] && [ "$DRY_RUN" != "true" ]; then
     cp "$WORK/out" "$WORK/COV_${_pi}" 2>/dev/null || true
   fi
 
@@ -306,28 +449,22 @@ _run_gate() {
 # ---------------------------------------------------------------------------
 _detect_lang() {
   _d="$1"
-  # Language Recipes first, in detection order, then the not-yet-migrated Languages.
-  for _rl in $RECIPE_LANGS; do
-    "_recipe_$_rl" detect "$_d" && printf '%s' "$_rl" && return
-  done
+  _try_recipe typescript && return
+  _try_recipe python && return
   [ -f "$_d/build.gradle.kts" ] && printf 'kotlin' && return
   { [ -f "$_d/build.gradle" ] && ls "$_d"/*.kt >/dev/null 2>&1; } \
     && printf 'kotlin' && return
   { [ -f "$_d/pom.xml" ] || [ -f "$_d/build.gradle" ]; } \
     && printf 'java' && return
   # go.mod is canonical — *.go files may appear in vendor/ of non-Go projects
-  [ -f "$_d/go.mod" ]         && printf 'go'     && return
-  [ -f "$_d/Cargo.toml" ]     && printf 'rust'   && return
+  _try_recipe go && return
+  _try_recipe rust && return
   { ls "$_d"/*.csproj >/dev/null 2>&1 || ls "$_d"/*.sln >/dev/null 2>&1 || \
     [ -f "$_d/global.json" ]; } && printf 'dotnet' && return
   [ -f "$_d/Gemfile" ]        && printf 'ruby'   && return
   [ -f "$_d/composer.json" ]  && printf 'php'    && return
-  { [ -f "$_d/Package.swift" ] || ls -d "$_d"/*.xcodeproj >/dev/null 2>&1; } \
-    && printf 'swift' && return
-  [ -f "$_d/CMakeLists.txt" ] && printf 'cpp'    && return
-  { [ -f "$_d/Makefile" ] && \
-    { ls "$_d"/*.c >/dev/null 2>&1 || ls "$_d"/*.cpp >/dev/null 2>&1; }; } \
-    && printf 'cpp' && return
+  _try_recipe swift && return
+  _try_recipe cpp && return
   [ -f "$_d/mix.exs" ]        && printf 'elixir' && return
   [ -f "$_d/build.sbt" ]      && printf 'scala'  && return
 }
@@ -412,14 +549,9 @@ _has_tests() {
   _d="$1"; _l="$2"
   case "$_l" in
     java|kotlin) [ -d "$_d/src/test" ] ;;
-    go)     find "$_d" -name '*_test.go' 2>/dev/null | grep -q . ;;
-    rust)   grep -r '#\[cfg(test)\]' "$_d/src" >/dev/null 2>&1 || [ -d "$_d/tests" ] ;;
     dotnet) find "$_d" \( -name '*Tests.cs' -o -name '*Test.cs' \) 2>/dev/null | grep -q . ;;
     ruby)   find "$_d" \( -name '*_spec.rb' -o -name '*_test.rb' \) 2>/dev/null | grep -q . ;;
     php)    find "$_d" -name '*Test.php' 2>/dev/null | grep -q . ;;
-    swift)  find "$_d" -name '*Tests.swift' 2>/dev/null | grep -q . ;;
-    cpp)    find "$_d" \( -name '*_test.c' -o -name '*_test.cpp' \) 2>/dev/null | grep -q . || \
-              [ -d "$_d/test" ] || [ -d "$_d/tests" ] ;;
     elixir) find "$_d" -name '*_test.exs' 2>/dev/null | grep -q . ;;
     scala)  [ -d "$_d/src/test" ] ;;
     *)      return 1 ;;
@@ -463,20 +595,6 @@ _build() {
       else
         _st=SKIPPED; _rs="toolchain not installed"
       fi ;;
-    go)
-      if command -v go >/dev/null 2>&1; then
-        _run "(cd '$_abs' && go build ./...)" && { _st=PASS; _rs=""; _ex=0; } || \
-          { _ex=$?; _st=FAIL; _rs="go build failed"; _log=$(_save_sidecar "$_pd" "$_lang" build); }
-      else
-        _st=SKIPPED; _rs="toolchain not installed (go not found)"
-      fi ;;
-    rust)
-      if command -v cargo >/dev/null 2>&1; then
-        _run "(cd '$_abs' && cargo build)" && { _st=PASS; _rs=""; _ex=0; } || \
-          { _ex=$?; _st=FAIL; _rs="cargo build failed"; _log=$(_save_sidecar "$_pd" "$_lang" build); }
-      else
-        _st=SKIPPED; _rs="toolchain not installed (cargo not found)"
-      fi ;;
     dotnet)
       if command -v dotnet >/dev/null 2>&1; then
         _run "(cd '$_abs' && dotnet restore && dotnet build)" && { _st=PASS; _rs=""; _ex=0; } || \
@@ -498,24 +616,6 @@ _build() {
           { _ex=$?; _st=FAIL; _rs="composer install failed"; _log=$(_save_sidecar "$_pd" "$_lang" build); }
       else
         _st=SKIPPED; _rs="toolchain not installed (composer not found)"
-      fi ;;
-    swift)
-      if command -v swift >/dev/null 2>&1; then
-        _run "(cd '$_abs' && swift build)" && { _st=PASS; _rs=""; _ex=0; } || \
-          { _ex=$?; _st=FAIL; _rs="swift build failed"; _log=$(_save_sidecar "$_pd" "$_lang" build); }
-      else
-        _st=SKIPPED; _rs="toolchain not installed (swift not found)"
-      fi ;;
-    cpp)
-      if [ -f "$_abs/CMakeLists.txt" ] && command -v cmake >/dev/null 2>&1; then
-        _run "(cd '$_abs' && cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build)" && \
-          { _st=PASS; _rs=""; _ex=0; } || \
-          { _ex=$?; _st=FAIL; _rs="cmake build failed"; _log=$(_save_sidecar "$_pd" "$_lang" build); }
-      elif [ -f "$_abs/Makefile" ] && command -v make >/dev/null 2>&1; then
-        _run "(cd '$_abs' && make)" && { _st=PASS; _rs=""; _ex=0; } || \
-          { _ex=$?; _st=FAIL; _rs="make failed"; _log=$(_save_sidecar "$_pd" "$_lang" build); }
-      else
-        _st=SKIPPED; _rs="toolchain not installed"
       fi ;;
     elixir)
       if command -v mix >/dev/null 2>&1; then
@@ -570,25 +670,6 @@ _test() {
   }
 
   case "$_lang" in
-    go)
-      if command -v go >/dev/null 2>&1; then
-        _run_test "(cd '$_abs' && go test -short -coverprofile='$WORK/cov.out' ./... && \
-          go tool cover -func='$WORK/cov.out')" && _ex=0 || _ex=$?
-        cp "$WORK/out" "$_covfile" 2>/dev/null || true
-        if [ "$_ex" = "0" ]; then _st=PASS; _rs=""
-        else _st=FAIL; _rs="go test failed"; _log=$(_save_sidecar "$_pd" "$_lang" test); fi
-      else
-        _st=SKIPPED; _rs="toolchain not installed (go not found)"
-      fi ;;
-    rust)
-      if command -v cargo >/dev/null 2>&1; then
-        _run_test "(cd '$_abs' && cargo test --lib)" && _ex=0 || _ex=$?
-        cp "$WORK/out" "$_covfile" 2>/dev/null || true
-        if [ "$_ex" = "0" ]; then _st=PASS; _rs=""
-        else _st=FAIL; _rs="cargo test failed"; _log=$(_save_sidecar "$_pd" "$_lang" test); fi
-      else
-        _st=SKIPPED; _rs="toolchain not installed (cargo not found)"
-      fi ;;
     java|kotlin)
       if [ -f "$_abs/mvnw" ]; then _tcmd="(cd '$_abs' && ./mvnw test)"
       elif command -v mvn >/dev/null 2>&1; then _tcmd="(cd '$_abs' && mvn test)"
@@ -629,23 +710,6 @@ _test() {
         else _st=FAIL; _rs="phpunit failed"; _log=$(_save_sidecar "$_pd" "$_lang" test); fi
       else
         _st=SKIPPED; _rs="toolchain not installed (phpunit not found)"
-      fi ;;
-    swift)
-      if command -v swift >/dev/null 2>&1; then
-        _run_test "(cd '$_abs' && swift test --enable-code-coverage)" && _ex=0 || _ex=$?
-        cp "$WORK/out" "$_covfile" 2>/dev/null || true
-        if [ "$_ex" = "0" ]; then _st=PASS; _rs=""
-        else _st=FAIL; _rs="swift test failed"; _log=$(_save_sidecar "$_pd" "$_lang" test); fi
-      else
-        _st=SKIPPED; _rs="toolchain not installed (swift not found)"
-      fi ;;
-    cpp)
-      if command -v ctest >/dev/null 2>&1; then
-        _run_test "(cd '$_abs' && ctest --test-dir build)" && _ex=0 || _ex=$?
-        if [ "$_ex" = "0" ]; then _st=PASS; _rs=""
-        else _st=FAIL; _rs="ctest failed"; _log=$(_save_sidecar "$_pd" "$_lang" test); fi
-      else
-        _st=SKIPPED; _rs="toolchain not installed (ctest not found)"
       fi ;;
     elixir)
       if command -v mix >/dev/null 2>&1; then
@@ -707,26 +771,6 @@ _lint() {
       else
         _st=SKIPPED; _rs="linter not installed"
       fi ;;
-    go)
-      # go vet is always available when Go is installed
-      if command -v go >/dev/null 2>&1; then
-        if command -v golangci-lint >/dev/null 2>&1; then
-          _run_lint "(cd '$_abs' && golangci-lint run)" && { _st=PASS; _ex=0; } || \
-            { _ex=$?; _st=FAIL; _rs="golangci-lint failed"; _log=$(_save_sidecar "$_pd" "$_lang" lint); }
-        else
-          _run_lint "(cd '$_abs' && go vet ./...)" && { _st=PASS; _ex=0; } || \
-            { _ex=$?; _st=FAIL; _rs="go vet failed"; _log=$(_save_sidecar "$_pd" "$_lang" lint); }
-        fi
-      else
-        _st=SKIPPED; _rs="toolchain not installed (go not found)"
-      fi ;;
-    rust)
-      if command -v cargo >/dev/null 2>&1; then
-        _run_lint "(cd '$_abs' && cargo clippy -- -D warnings)" && { _st=PASS; _ex=0; } || \
-          { _ex=$?; _st=FAIL; _rs="clippy failed"; _log=$(_save_sidecar "$_pd" "$_lang" lint); }
-      else
-        _st=SKIPPED; _rs="toolchain not installed (cargo not found)"
-      fi ;;
     dotnet)
       if command -v dotnet >/dev/null 2>&1; then
         _run_lint "(cd '$_abs' && dotnet format --verify-no-changes)" && { _st=PASS; _ex=0; } || \
@@ -747,26 +791,6 @@ _lint() {
           { _ex=$?; _st=FAIL; _rs="phpstan failed"; _log=$(_save_sidecar "$_pd" "$_lang" lint); }
       else
         _st=SKIPPED; _rs="linter not installed (phpstan/psalm not found)"
-      fi ;;
-    swift)
-      if command -v swiftlint >/dev/null 2>&1; then
-        _run_lint "(cd '$_abs' && swiftlint)" && { _st=PASS; _ex=0; } || \
-          { _ex=$?; _st=FAIL; _rs="swiftlint failed"; _log=$(_save_sidecar "$_pd" "$_lang" lint); }
-      else
-        _st=SKIPPED; _rs="linter not installed (swiftlint not found)"
-      fi ;;
-    cpp)
-      if command -v clang-tidy >/dev/null 2>&1; then
-        _cfiles=$(find "$_abs" -maxdepth 4 \( -name '*.cpp' -o -name '*.c' \) \
-          ! -path '*/build/*' 2>/dev/null | head -100 | tr '\n' ' ')
-        if [ -n "$_cfiles" ]; then
-          _run_lint "(cd '$_abs' && clang-tidy $_cfiles --)" && { _st=PASS; _ex=0; } || \
-            { _ex=$?; _st=FAIL; _rs="clang-tidy failed"; _log=$(_save_sidecar "$_pd" "$_lang" lint); }
-        else
-          _st=SKIPPED; _rs="no .c/.cpp source files found"
-        fi
-      else
-        _st=SKIPPED; _rs="linter not installed (clang-tidy not found)"
       fi ;;
     elixir)
       if command -v mix >/dev/null 2>&1; then
@@ -823,13 +847,11 @@ _coverage() {
   fi
 
   # Parse line coverage percentage from the captured output
+  _cov_unsupported=false
   case "$_lang" in
-    typescript|python)
-      _lpct=$("_recipe_$_lang" coverage "$_abs") ;;
-    go)
-      # total:  (statements)   77.8%
-      _lpct=$(grep '^total:' "$_covfile" 2>/dev/null | \
-        awk '{print $NF}' | sed 's/%//' | head -1) ;;
+    typescript|python|go|rust|swift|cpp)
+      # A recipe with no coverage reader returns non-zero.
+      _lpct=$("_recipe_$_lang" coverage "$_abs") || _cov_unsupported=true ;;
     java|kotlin)
       _jxml="$_abs/target/site/jacoco/jacoco.xml"
       [ -f "$_abs/build/reports/jacoco/test/jacocoTestReport.xml" ] && \
@@ -840,24 +862,23 @@ _coverage() {
         [ -n "$_missed" ] && [ -n "$_cov" ] && _tot=$((_missed + _cov)) && [ "$_tot" -gt 0 ] && \
           _lpct=$(awk "BEGIN{printf \"%.1f\",($_cov/$_tot)*100}")
       fi ;;
-    rust)
-      _lpct=$(grep 'TOTAL' "$_covfile" 2>/dev/null | awk '{print $NF}' | sed 's/%//' | head -1)
-      [ -z "$_lpct" ] && _lpct=$(grep -o '[0-9]*\.[0-9]*% coverage' "$_covfile" 2>/dev/null | \
-        sed 's/% coverage//' | head -1) ;;
     php)
       _lpct=$(grep 'Lines:' "$_covfile" 2>/dev/null | \
         grep -o '[0-9]*\.[0-9]*%' | sed 's/%//' | head -1) ;;
     elixir)
       _lpct=$(grep -o '[0-9]*\.[0-9]*% | Total' "$_covfile" 2>/dev/null | \
         sed 's/% | Total//' | head -1) ;;
-    *)
-      _st=SKIPPED; _rs="coverage parsing not implemented for $_lang"
-      _t1=$(date +%s); _dur=$((_t1 - _t0))
-      _status_line "$_pd" "$_lang" "coverage" "$_st" "$_rs"
-      _write_state "coverage" "$_st" "$_rs" "$_ex" "$_dur" "$_log"
-      _gr_set "$_pi" coverage lpct "$_lpct"
-      return ;;
+    *) _cov_unsupported=true ;;
   esac
+
+  if [ "$_cov_unsupported" = "true" ]; then
+    _st=SKIPPED; _rs="coverage parsing not implemented for $_lang"
+    _t1=$(date +%s); _dur=$((_t1 - _t0))
+    _status_line "$_pd" "$_lang" "coverage" "$_st" "$_rs"
+    _write_state "coverage" "$_st" "$_rs" "$_ex" "$_dur" "$_log"
+    _gr_set "$_pi" coverage lpct "$_lpct"
+    return
+  fi
 
   if [ -z "$_lpct" ]; then
     _st=SKIPPED; _rs="coverage output unparseable"
