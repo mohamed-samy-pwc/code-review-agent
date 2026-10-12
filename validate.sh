@@ -628,7 +628,10 @@ _gate_cmd() { # <append yes|no> <dir> <cmd> [args...]
   GATE_RAN=true
   if [ "$DRY_RUN" = "true" ]; then printf "[DRY RUN] (cd '%s' && %s)\n" "$_dir" "$*"; GATE_EXIT=0; return 0; fi
   [ "$_app" = "yes" ] || : > "$WORK/out"
-  if $VERBOSE; then (cd "$_dir" && "$@") 2>&1 | tee -a "$WORK/out"; GATE_EXIT="${PIPESTATUS:-$?}"
+  if $VERBOSE; then
+    # POSIX sh has no PIPESTATUS, so carry the command's status past tee in a file.
+    { (cd "$_dir" && "$@") 2>&1; printf '%s' "$?" > "$WORK/status"; } | tee -a "$WORK/out"
+    GATE_EXIT=$(cat "$WORK/status")
   else (cd "$_dir" && "$@") >> "$WORK/out" 2>&1; GATE_EXIT=$?; fi
 }
 gate_exec()      { _gate_cmd no "$@"; }

@@ -322,6 +322,19 @@ assert_file_not_exists "$DRY_REPORT" "--dry-run does not write validation-report
 
 printf '\n'
 
+# --verbose must still classify a failing Gate as FAIL under shells without
+# PIPESTATUS (dash). Regression: the exit status used to be tee's, i.e. 0.
+if command -v dash >/dev/null 2>&1; then
+  exit_code=0
+  (cd "$FIXTURES/js-ts-test-fail" && dash "$VALIDATE_SH" --verbose) > /dev/null 2>&1 || exit_code=$?
+  rm -rf "$FIXTURES/js-ts-test-fail/validation-report.json" "$FIXTURES/js-ts-test-fail/validation-logs"
+  assert_exit_code "1" "$exit_code" "--verbose under dash still exits 1 on a failing Gate"
+else
+  pending "--verbose under dash (dash not installed)"
+fi
+
+printf '\n'
+
 # ==========================================================================
 # GROUP 10: per-language coverage threshold via .validation.conf
 # ==========================================================================
