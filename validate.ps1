@@ -132,7 +132,7 @@ $script:Gate = $null
 function New-GateState {
     $script:Gate = [pscustomobject]@{
         Status = 'SKIPPED'; Reason = ''; ExitCode = $null; LogFile = $null
-        Last = $null; CovContent = $null; CovUnsupported = $false; NoCoverage = $false
+        Last = $null; CovContent = $null; CovUnsupported = $false
         Detail = ''; LineCovPct = $null; Threshold = $null
         Proj = ''; Lang = ''; Name = ''
     }
@@ -173,8 +173,6 @@ function Invoke-GateSeq { param([string]$Dir, [string]$Mode, [object[]]$Steps)
     $script:Gate.Last = @{ ExitCode = $last.ExitCode; Output = $out }
 }
 
-# The test run left no coverage output to parse later.
-function Set-GateNoCoverage { $script:Gate.NoCoverage = $true }
 # The Language has no coverage reader.
 function Set-GateCoverageUnsupported { $script:Gate.CovUnsupported = $true }
 
@@ -215,7 +213,8 @@ function Set-GateCoverage { param([string]$Dir)
     }
     $script:Gate.LineCovPct = $lpct
     if ($null -eq $lpct) {
-        Set-GateSkip 'coverage output unparseable'
+        $hint = & "Recipe-$lang" 'coverage_hint' $Dir
+        Set-GateSkip $(if ($hint) { "coverage output unparseable ($hint)" } else { 'coverage output unparseable' })
         Set-Content (Join-Path $LogDir "${projectDir}-${lang}-coverage-raw.log") $covContent -Encoding UTF8
         $script:Gate.LogFile = "validation-logs/${projectDir}-${lang}-coverage-raw.log"
     } elseif ($lpct -ge $thr) {
@@ -242,7 +241,7 @@ function Invoke-Gate { param([string]$Name, $P)
     } else {
         & "Recipe-$lang" $Name $abs
         # Coverage is parsed later from the test Gate's captured output.
-        if ($Name -eq 'test' -and $script:Gate.Last -and -not $script:Gate.NoCoverage -and -not $DryRun) {
+        if ($Name -eq 'test' -and $script:Gate.Last -and -not $DryRun) {
             $covFile = Join-Path $WorkDir "COV_${projectDir}_${lang}.txt"
             Set-Content -Path $covFile -Value $script:Gate.Last.Output -Encoding UTF8
         }
@@ -279,12 +278,17 @@ function Recipe-typescript { param([string]$Req, [string]$Dir)
         }
         'test' {
             if (-not (Find-Cmd 'npm')) { Set-GateSkip 'toolchain not installed (npm not found)'; return }
-            Invoke-GateExec $Dir 'npm' @('test','--','--coverage','--coverageReporters=text','--testPathPattern=(unit|spec)','--forceExit')
-            # Fallback if no tests matched pattern
-            if ($script:Gate.Last.Output -match 'Your test suite must contain at least one test|No tests found') {
-                Invoke-GateExec $Dir 'npm' @('test','--','--coverage','--coverageReporters=text','--forceExit')
+            if ((Test-Path "$Dir/package.json") -and ((Get-Content "$Dir/package.json" -Raw) -match '"vitest"')) {
+                # Vitest has none of Jest's flags; run the whole suite with its text reporter.
+                Invoke-GateRun 'npm test failed (exit {exit})' $Dir 'npm' @('test','--','--coverage','--coverage.reporter=text')
+            } else {
+                # Jest: run with unit pattern; if no tests match, retry without pattern
+                Invoke-GateExec $Dir 'npm' @('test','--','--coverage','--coverageReporters=text','--testPathPattern=(unit|spec)','--forceExit')
+                if ($script:Gate.Last.Output -match 'Your test suite must contain at least one test|No tests found') {
+                    Invoke-GateExec $Dir 'npm' @('test','--','--coverage','--coverageReporters=text','--forceExit')
+                }
+                Complete-Gate 'npm test failed (exit {exit})'
             }
-            Complete-Gate 'npm test failed (exit {exit})'
         }
         'lint' {
             # Check for ESLint config before invoking
@@ -297,7 +301,8 @@ function Recipe-typescript { param([string]$Req, [string]$Dir)
             Invoke-GateRun 'eslint failed (exit {exit})' $Dir $eslintBin @('.')
         }
         'coverage' {
-            if ($script:Gate.CovContent -match 'All files\s*\|\s*([\d.]+)\s*\|\s*([\d.]+)\s*\|\s*([\d.]+)\s*\|\s*([\d.]+)') {
+            $cleanCov = [regex]::Replace([string]$script:Gate.CovContent, '\x1b\[[0-9;]*m', '')
+            if ($cleanCov -match 'All files\s*\|\s*([\d.]+)\s*\|\s*([\d.]+)\s*\|\s*([\d.]+)\s*\|\s*([\d.]+)') {
                 return [double]$Matches[4]  # Lines column (4th)
             }
         }
@@ -350,6 +355,14 @@ function Recipe-python { param([string]$Req, [string]$Dir)
     }
 }
 
+# True when any of the named files in $Dir mentions $Needle (a dependency or plugin name).
+function Test-FileMentions { param([string]$Dir, [string[]]$Files, [string]$Needle)
+    foreach ($f in $Files) {
+        if ((Test-Path "$Dir/$f") -and ((Get-Content "$Dir/$f" -Raw) -match [regex]::Escape($Needle))) { return $true }
+    }
+    return $false
+}
+
 # True when a Gradle settings file includes subprojects.
 function Test-GradleIncludes { param([string]$Dir)
     foreach ($f in 'settings.gradle','settings.gradle.kts') {
@@ -373,11 +386,18 @@ function Get-JacocoLinePct { param([string]$Dir)
     }
 }
 
+# Gradle launcher for a Project: its wrapper, else a system `gradle` when the Project has a build file.
+function Get-GradleLauncher { param([string]$Dir)
+    if (Test-Path "$Dir/gradlew") { return "$Dir/gradlew" }
+    if (((Test-Path "$Dir/build.gradle") -or (Test-Path "$Dir/build.gradle.kts")) -and (Find-Cmd 'gradle')) { return 'gradle' }
+    return $null
+}
+
 # Test Gate shared by the JVM Languages (Java, Kotlin).
 function Invoke-JvmTest { param([string]$Dir)
     if (Test-Path "$Dir/mvnw")        { Invoke-GateRun 'test failed' $Dir "$Dir/mvnw" @('test') }
-    elseif (Find-Cmd 'mvn')           { Invoke-GateRun 'test failed' $Dir 'mvn' @('test') }
-    elseif (Test-Path "$Dir/gradlew") { Invoke-GateRun 'test failed' $Dir "$Dir/gradlew" @('test') }
+    elseif ((Test-Path "$Dir/pom.xml") -and (Find-Cmd 'mvn'))           { Invoke-GateRun 'test failed' $Dir 'mvn' @('test') }
+    elseif (Get-GradleLauncher $Dir)  { Invoke-GateRun 'test failed' $Dir (Get-GradleLauncher $Dir) @('test') }
     else { Set-GateSkip 'toolchain not installed' }
 }
 
@@ -388,14 +408,15 @@ function Recipe-java { param([string]$Req, [string]$Dir)
         'has_tests' { return (Test-Path "$Dir/src/test") }
         'build' {
             if (Test-Path "$Dir/mvnw")        { Invoke-GateRun 'mvnw failed' $Dir "$Dir/mvnw" @('package','-DskipTests') }
-            elseif (Find-Cmd 'mvn')           { Invoke-GateRun 'mvn failed' $Dir 'mvn' @('package','-DskipTests') }
-            elseif (Test-Path "$Dir/gradlew") { Invoke-GateRun 'gradlew assemble failed' $Dir "$Dir/gradlew" @('assemble') }
+            elseif ((Test-Path "$Dir/pom.xml") -and (Find-Cmd 'mvn'))           { Invoke-GateRun 'mvn failed' $Dir 'mvn' @('package','-DskipTests') }
+            elseif (Get-GradleLauncher $Dir)  { Invoke-GateRun 'gradlew assemble failed' $Dir (Get-GradleLauncher $Dir) @('assemble') }
             else { Set-GateSkip 'toolchain not installed' }
         }
         'test' { Invoke-JvmTest $Dir }
         'lint' {
             if (Test-Path "$Dir/mvnw")        { Invoke-GateRun 'checkstyle failed' $Dir "$Dir/mvnw" @('checkstyle:check') }
-            elseif (Test-Path "$Dir/gradlew") { Invoke-GateRun 'checkstyle failed' $Dir "$Dir/gradlew" @('checkstyleMain') }
+            elseif ((Test-Path "$Dir/pom.xml") -and (Find-Cmd 'mvn')) { Invoke-GateRun 'checkstyle failed' $Dir 'mvn' @('checkstyle:check') }
+            elseif ((Get-GradleLauncher $Dir) -and (Test-FileMentions $Dir @('build.gradle','build.gradle.kts') 'checkstyle')) { Invoke-GateRun 'checkstyle failed' $Dir (Get-GradleLauncher $Dir) @('checkstyleMain') }
             else { Set-GateSkip 'linter not installed' }
         }
         'coverage' { return Get-JacocoLinePct $Dir }
@@ -411,12 +432,12 @@ function Recipe-kotlin { param([string]$Req, [string]$Dir)
         }
         'has_tests' { return (Test-Path "$Dir/src/test") }
         'build' {
-            if (Test-Path "$Dir/gradlew") { Invoke-GateRun 'gradlew assemble failed' $Dir "$Dir/gradlew" @('assemble') }
+            if (Get-GradleLauncher $Dir) { Invoke-GateRun 'gradlew assemble failed' $Dir (Get-GradleLauncher $Dir) @('assemble') }
             else { Set-GateSkip 'toolchain not installed' }
         }
         'test' { Invoke-JvmTest $Dir }
         'lint' {
-            if (Test-Path "$Dir/gradlew") { Invoke-GateRun 'ktlint failed' $Dir "$Dir/gradlew" @('ktlintCheck') }
+            if ((Get-GradleLauncher $Dir) -and (Test-FileMentions $Dir @('build.gradle','build.gradle.kts') 'ktlint')) { Invoke-GateRun 'ktlint failed' $Dir (Get-GradleLauncher $Dir) @('ktlintCheck') }
             else { Set-GateSkip 'linter not installed' }
         }
         'coverage' { return Get-JacocoLinePct $Dir }
@@ -456,6 +477,7 @@ function Recipe-go { param([string]$Req, [string]$Dir)
 function Recipe-rust { param([string]$Req, [string]$Dir)
     switch ($Req) {
         'workspace_root' { return ((Test-Path "$Dir/Cargo.toml") -and ((Get-Content "$Dir/Cargo.toml" -Raw) -match '(?m)^\[workspace\]')) }
+        'coverage_hint' { return 'install cargo-llvm-cov or cargo-tarpaulin' }
         'detect' { return (Test-Path "$Dir/Cargo.toml") }
         'has_tests' {
             if (Test-Path "$Dir/tests") { return $true }
@@ -467,15 +489,34 @@ function Recipe-rust { param([string]$Req, [string]$Dir)
             else { Set-GateSkip 'toolchain not installed (cargo not found)' }
         }
         'test' {
-            if (Find-Cmd 'cargo') { Invoke-GateRun 'cargo test failed' $Dir 'cargo' @('test','--lib') }
+            if (Find-Cmd 'cargo') {
+                # Tests run once; a coverage tool, when installed, measures that same run.
+                & cargo llvm-cov --version *> $null; $llvmCov = ($LASTEXITCODE -eq 0)
+                if ($llvmCov) { Invoke-GateRun 'cargo test failed' $Dir 'cargo' @('llvm-cov','--lib') }
+                else {
+                    & cargo tarpaulin --version *> $null; $tarpaulin = ($LASTEXITCODE -eq 0)
+                    if ($tarpaulin) { Invoke-GateRun 'cargo test failed' $Dir 'cargo' @('tarpaulin','--lib','--out','Stdout') }
+                    else { Invoke-GateRun 'cargo test failed' $Dir 'cargo' @('test','--lib') }
+                }
+            }
             else { Set-GateSkip 'toolchain not installed (cargo not found)' }
         }
         'lint' {
-            if (Find-Cmd 'cargo') { Invoke-GateRun 'clippy failed' $Dir 'cargo' @('clippy','--','-D','warnings') }
-            else { Set-GateSkip 'toolchain not installed (cargo not found)' }
+            if (-not (Find-Cmd 'cargo')) { Set-GateSkip 'toolchain not installed (cargo not found)' }
+            else {
+                & cargo clippy --version *> $null
+                if ($LASTEXITCODE -ne 0) { Set-GateSkip 'linter not installed (cargo clippy not found)' }
+                else { Invoke-GateRun 'clippy failed' $Dir 'cargo' @('clippy','--','-D','warnings') }
+            }
         }
         'coverage' {
-            if ($script:Gate.CovContent -match 'TOTAL\s+.*\s+([\d.]+)%') { return [double]$Matches[1] }
+            # cargo-llvm-cov: "TOTAL regions missed cover% functions missed exec% lines missed cover% ..."
+            $total = ([string]$script:Gate.CovContent -split "`r?`n" | Where-Object { $_ -match 'TOTAL' } | Select-Object -First 1)
+            if ($total) {
+                $f = $total.Trim() -split '\s+'
+                $cell = if ($f.Count -ge 10) { $f[9] } else { $f[-1] }
+                if ($cell -match '^([\d.]+)%$') { return [double]$Matches[1] }
+            }
             if ($script:Gate.CovContent -match '([\d.]+)% coverage') { return [double]$Matches[1] }
         }
     }
@@ -540,29 +581,54 @@ function Recipe-ruby { param([string]$Req, [string]$Dir)
         }
         'test' {
             if (Find-Cmd 'bundle') {
-                Invoke-GateSeq $Dir 'or' @((New-GateStep 'bundle' @('exec','rspec','--tag','unit','spec/')),
-                                           (New-GateStep 'bundle' @('exec','rspec','spec/')))
-                Complete-Gate 'rspec failed'
+                if ((Test-Path "$Dir/bin/rails") -and -not (Test-Path "$Dir/spec")) {
+                    Invoke-GateRun 'rails test failed' $Dir 'bundle' @('exec','rails','test')
+                } elseif (-not (Test-Path "$Dir/spec") -and (Test-Path "$Dir/test")) {
+                    # Minitest without Rails
+                    Invoke-GateRun 'minitest failed' $Dir 'bundle' @('exec','ruby','-Itest','-e',"Dir.glob('./test/**/*_test.rb').sort.each { |f| require f }")
+                } else {
+                    Invoke-GateExec $Dir 'bundle' @('exec','rspec','--tag','unit','spec/')
+                    # RSpec exits 0 when no example carries the tag, so also fall back on "0 examples".
+                    if ($script:Gate.Last.ExitCode -ne 0 -or $script:Gate.Last.Output -match '(^|[^0-9])0 examples,') {
+                        Invoke-GateExec $Dir 'bundle' @('exec','rspec','spec/')
+                    }
+                    Complete-Gate 'rspec failed'
+                }
             } else { Set-GateSkip 'toolchain not installed (bundle not found)' }
         }
         'lint' {
-            if (Find-Cmd 'bundle') { Invoke-GateRun 'rubocop failed' $Dir 'bundle' @('exec','rubocop') }
-            else { Set-GateSkip 'linter not installed (bundle not found)' }
+            if (-not (Find-Cmd 'bundle')) { Set-GateSkip 'linter not installed (bundle not found)' }
+            elseif (-not (Test-FileMentions $Dir @('Gemfile','Gemfile.lock') 'rubocop')) { Set-GateSkip 'linter not installed (rubocop not in Gemfile)' }
+            else { Invoke-GateRun 'rubocop failed' $Dir 'bundle' @('exec','rubocop') }
         }
-        'coverage' { Set-GateCoverageUnsupported }
+        'coverage' {
+            # SimpleCov prints "Line coverage: 2 / 2 (100.00%)", sometimes with ANSI colour.
+            $clean = [regex]::Replace([string]$script:Gate.CovContent, '\x1b\[[0-9;]*m', '')
+            $all = [regex]::Matches($clean, '(?i)line coverage:[^(]*\(([\d.]+)%\)')
+            if ($all.Count -gt 0) { return [double]$all[$all.Count - 1].Groups[1].Value }
+        }
     }
 }
 
 function Recipe-php { param([string]$Req, [string]$Dir)
     switch ($Req) {
+        'coverage_hint' { return 'install xdebug or pcov so PHPUnit can measure coverage' }
         'detect'    { return (Test-Path "$Dir/composer.json") }
         'has_tests' { return $null -ne (Get-ChildItem -Path $Dir -Recurse -Filter '*Test.php' -ErrorAction SilentlyContinue | Select-Object -First 1) }
         'build' {
-            if (Find-Cmd 'composer') { Invoke-GateRun 'composer install failed' $Dir 'composer' @('install','--no-dev') }
+            # Dev dependencies stay: the test and lint Gates need phpunit and phpstan from vendor/.
+            if (Find-Cmd 'composer') { Invoke-GateRun 'composer install failed' $Dir 'composer' @('install','--no-interaction') }
             else { Set-GateSkip 'toolchain not installed (composer not found)' }
         }
         'test' {
-            if (Test-Path "$Dir/vendor/bin/phpunit") { Invoke-GateRun 'phpunit failed' $Dir "$Dir/vendor/bin/phpunit" @('--coverage-text') }
+            if (Test-Path "$Dir/vendor/bin/phpunit") {
+                Invoke-GateExec $Dir "$Dir/vendor/bin/phpunit" @('--coverage-text')
+                # Without xdebug or pcov PHPUnit exits 1 even when every test passes; rerun without coverage.
+                if ($script:Gate.Last.ExitCode -ne 0 -and $script:Gate.Last.Output -match 'No code coverage driver available') {
+                    Invoke-GateExec $Dir "$Dir/vendor/bin/phpunit" @()
+                }
+                Complete-Gate 'phpunit failed'
+            }
             else { Set-GateSkip 'toolchain not installed (phpunit not found)' }
         }
         'lint' {
@@ -587,14 +653,35 @@ function Recipe-swift { param([string]$Req, [string]$Dir)
             else { Set-GateSkip 'toolchain not installed (swift not found)' }
         }
         'test' {
-            if (Find-Cmd 'swift') { Invoke-GateRun 'swift test failed' $Dir 'swift' @('test','--enable-code-coverage') }
+            if (Find-Cmd 'swift') {
+                Invoke-GateExec $Dir 'swift' @('test','--enable-code-coverage')
+                # Ask SwiftPM where it wrote the coverage JSON; the path lands in the captured output.
+                if ($script:Gate.Last.ExitCode -eq 0) {
+                    $first = $script:Gate.Last
+                    Invoke-GateSeq $Dir 'and' @((New-GateStep 'swift' @('test','--show-codecov-path')))
+                    $script:Gate.Last = @{ ExitCode = $script:Gate.Last.ExitCode; Output = $first.Output + $script:Gate.Last.Output }
+                }
+                Complete-Gate 'swift test failed'
+            }
             else { Set-GateSkip 'toolchain not installed (swift not found)' }
         }
         'lint' {
             if (Find-Cmd 'swiftlint') { Invoke-GateRun 'swiftlint failed' $Dir 'swiftlint' @() }
             else { Set-GateSkip 'linter not installed (swiftlint not found)' }
         }
-        'coverage' { Set-GateCoverageUnsupported }
+        'coverage' {
+            # SwiftPM's coverage JSON: sum line counts over the package's own sources
+            # (not Tests/ and not .build/).
+            $jsonPath = ([string]$script:Gate.CovContent -split "`r?`n" | Where-Object { $_ -match '\.json\s*$' } | Select-Object -Last 1)
+            if ($jsonPath) { $jsonPath = $jsonPath.Trim() }
+            if ($jsonPath -and (Test-Path -LiteralPath $jsonPath)) {
+                $files = (Get-Content -LiteralPath $jsonPath -Raw | ConvertFrom-Json).data[0].files |
+                    Where-Object { $_.filename -notmatch '[\\/](Tests|\.build)[\\/]' }
+                $count = ($files | ForEach-Object { $_.summary.lines.count } | Measure-Object -Sum).Sum
+                $cov   = ($files | ForEach-Object { $_.summary.lines.covered } | Measure-Object -Sum).Sum
+                if ($count -gt 0) { return [Math]::Round($cov / $count * 100, 1, [MidpointRounding]::AwayFromZero) }
+            }
+        }
     }
 }
 
@@ -620,13 +707,19 @@ function Recipe-cpp { param([string]$Req, [string]$Dir)
             } else { Set-GateSkip 'toolchain not installed' }
         }
         'test' {
-            if (Find-Cmd 'ctest') {
-                Set-GateNoCoverage
-                Invoke-GateRun 'ctest failed' $Dir 'ctest' @('--test-dir','build')
-            } else { Set-GateSkip 'toolchain not installed (ctest not found)' }
+            if ((Test-Path "$Dir/CMakeLists.txt") -or -not (Test-Path "$Dir/Makefile")) {
+                if (Find-Cmd 'ctest') {
+                    Invoke-GateRun 'ctest failed' $Dir 'ctest' @('--test-dir','build')
+                } else { Set-GateSkip 'toolchain not installed (ctest not found)' }
+            } elseif (((Get-Content "$Dir/Makefile" -Raw) -match '(?m)^test:') -and (Find-Cmd 'make')) {
+                # Makefile project with a `test` target
+                Invoke-GateRun 'make test failed' $Dir 'make' @('test')
+            } else { Set-GateSkip 'no test command detected (no CMakeLists.txt, or no test target in Makefile)' }
         }
         'lint' {
             if (-not (Find-Cmd 'clang-tidy')) { Set-GateSkip 'linter not installed (clang-tidy not found)'; return }
+            # Without a config clang-tidy exits with "no checks enabled", which is not a lint failure.
+            if (-not (Test-Path "$Dir/.clang-tidy")) { Set-GateSkip 'no .clang-tidy config found'; return }
             $cfiles = @(Get-ChildItem -Path $Dir -Recurse -Depth 3 -File -Include '*.cpp','*.c' -ErrorAction SilentlyContinue |
                 Where-Object { $_.FullName -notmatch '[\\/]build[\\/]' } | Select-Object -First 100 | ForEach-Object { $_.FullName })
             if ($cfiles.Count -gt 0) { Invoke-GateRun 'clang-tidy failed' $Dir 'clang-tidy' ($cfiles + '--') }
@@ -646,16 +739,18 @@ function Recipe-elixir { param([string]$Req, [string]$Dir)
         }
         'test' {
             if (Find-Cmd 'mix') {
-                Invoke-GateSeq $Dir 'or' @((New-GateStep 'mix' @('test','--only','unit')), (New-GateStep 'mix' @('test')))
+                Invoke-GateSeq $Dir 'or' @((New-GateStep 'mix' @('test','--cover','--only','unit')), (New-GateStep 'mix' @('test','--cover')))
                 Complete-Gate 'mix test failed'
             } else { Set-GateSkip 'toolchain not installed (mix not found)' }
         }
         'lint' {
-            if (Find-Cmd 'mix') { Invoke-GateRun 'mix credo failed' $Dir 'mix' @('credo') }
-            else { Set-GateSkip 'toolchain not installed (mix not found)' }
+            if (-not (Find-Cmd 'mix')) { Set-GateSkip 'toolchain not installed (mix not found)' }
+            elseif (-not (Test-FileMentions $Dir @('mix.exs') 'credo')) { Set-GateSkip 'linter not installed (credo not in mix.exs)' }
+            else { Invoke-GateRun 'mix credo failed' $Dir 'mix' @('credo') }
         }
         'coverage' {
-            if ($script:Gate.CovContent -match '([\d.]+)% \| Total') { return [double]$Matches[1] }
+            $all = [regex]::Matches([string]$script:Gate.CovContent, '([\d.]+)% \| Total')
+            if ($all.Count -gt 0) { return [double]$all[$all.Count - 1].Groups[1].Value }
         }
     }
 }
@@ -670,15 +765,35 @@ function Recipe-scala { param([string]$Req, [string]$Dir)
         }
         'test' {
             if (Find-Cmd 'sbt') {
-                Invoke-GateSeq $Dir 'or' @((New-GateStep 'sbt' @('testOnly *Unit*')), (New-GateStep 'sbt' @('test')))
+                $scoverage = [bool](Get-ChildItem -Path "$Dir/project" -File -ErrorAction SilentlyContinue | Select-String -Pattern 'scoverage' -List -ErrorAction SilentlyContinue)
+                if ($scoverage) {
+                    # sbt-scoverage measures the same run; its report prints "Statement coverage.: NN.NN%".
+                    Invoke-GateExec $Dir 'sbt' @('coverage','testOnly *Unit*','coverageReport')
+                } else {
+                    Invoke-GateExec $Dir 'sbt' @('testOnly *Unit*')
+                }
+                # sbt exits 0 when the pattern matches nothing, so also fall back on "No tests to run".
+                if ($script:Gate.Last.ExitCode -ne 0 -or $script:Gate.Last.Output -match 'No tests to run') {
+                    if ($scoverage) { Invoke-GateExec $Dir 'sbt' @('coverage','test','coverageReport') }
+                    else { Invoke-GateExec $Dir 'sbt' @('test') }
+                }
                 Complete-Gate 'sbt test failed'
             } else { Set-GateSkip 'toolchain not installed (sbt not found)' }
         }
         'lint' {
-            if (Find-Cmd 'sbt') { Invoke-GateRun 'scalastyle failed' $Dir 'sbt' @('scalastyle') }
-            else { Set-GateSkip 'toolchain not installed (sbt not found)' }
+            if (-not (Find-Cmd 'sbt')) { Set-GateSkip 'toolchain not installed (sbt not found)' }
+            elseif (-not ((Test-FileMentions $Dir @('build.sbt') 'scalastyle') -or
+                          (Get-ChildItem -Path "$Dir/project" -File -ErrorAction SilentlyContinue | Select-String -Pattern 'scalastyle' -List -ErrorAction SilentlyContinue))) {
+                Set-GateSkip 'linter not installed (scalastyle plugin not configured)'
+            }
+            else { Invoke-GateRun 'scalastyle failed' $Dir 'sbt' @('scalastyle') }
         }
-        'coverage' { Set-GateCoverageUnsupported }
+        'coverage' {
+            # sbt-scoverage reports statement coverage (the closest it has to line coverage).
+            $all = [regex]::Matches([string]$script:Gate.CovContent, 'Statement coverage[.]*:\s*([\d.]+)%')
+            if ($all.Count -gt 0) { return [double]$all[$all.Count - 1].Groups[1].Value }
+        }
+        'coverage_hint' { return 'add the sbt-scoverage plugin to project/plugins.sbt' }
     }
 }
 

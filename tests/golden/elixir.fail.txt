@@ -1,8 +1,8 @@
 exit 1
 calls:
 mix compile
-mix test --only unit
-mix test
+mix test --cover --only unit
+mix test --cover
 mix credo
 gates:
 build FAIL exit=1 reason="mix compile failed" log="validation-logs/root-elixir-build.log" line_pct= threshold=

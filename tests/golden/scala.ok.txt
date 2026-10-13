@@ -7,4 +7,4 @@ gates:
 build PASS exit=0 reason=null log=null line_pct= threshold=
 test PASS exit=0 reason=null log=null line_pct= threshold=
 lint PASS exit=0 reason=null log=null line_pct= threshold=
-coverage SKIPPED exit=null reason="coverage parsing not implemented for scala" log=null line_pct=null threshold=80
+coverage SKIPPED exit=null reason="coverage output unparseable (add the sbt-scoverage plugin to project/plugins.sbt)" log="validation-logs/root-scala-coverage-raw.log" line_pct=null threshold=80

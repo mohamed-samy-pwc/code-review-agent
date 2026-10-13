@@ -7,4 +7,4 @@ gates:
 build FAIL exit=1 reason="cmake build failed" log="validation-logs/root-cpp-build.log" line_pct= threshold=
 test FAIL exit=1 reason="ctest failed" log="validation-logs/root-cpp-test.log" line_pct= threshold=
 lint FAIL exit=1 reason="clang-tidy failed" log="validation-logs/root-cpp-lint.log" line_pct= threshold=
-coverage SKIPPED exit=null reason="no coverage data (test gate skipped or failed)" log=null line_pct=null threshold=80
+coverage SKIPPED exit=null reason="coverage parsing not implemented for cpp" log=null line_pct=null threshold=80

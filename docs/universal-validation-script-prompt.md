@@ -139,7 +139,7 @@ found, mark SKIPPED with reason "toolchain not installed".
 - .NET:     `dotnet restore && dotnet build`
             (always restore first — script runs on fresh checkouts)
 - Ruby:     `bundle exec rake build` (SKIPPED if no "build" task in Rakefile)
-- PHP:      `composer install --no-dev`
+- PHP:      `composer install --no-interaction` (dev dependencies stay: the test and lint Gates need phpunit and phpstan; the original --no-dev removed them)`
 - Swift:    `swift build`
 - C/C++ (CMake): `cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build`
 - C/C++ (Make):  `make`

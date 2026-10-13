@@ -1,6 +1,6 @@
 exit 1
 calls:
-composer install --no-dev
+composer install --no-interaction
 phpunit --coverage-text
 phpstan analyse
 gates:

@@ -52,6 +52,7 @@ _char_canned_output() { # <lang> <stub dir> <project dir>
     rust)       printf 'TOTAL    100    15    85.00%%\n' > "$2/cargo.out" ;;
     php)        printf 'Lines:   91.00%% (10/11)\n' > "$2/phpunit.out" ;;
     elixir)     printf '88.00%% | Total\n' > "$2/mix.out" ;;
+    ruby)       printf 'Line coverage: 90 / 100 (90.00%%)\n' > "$2/bundle.out" ;;
     dotnet)     printf 'Attachments:\n  %s/TestResults/g/coverage.cobertura.xml\n' "$3" > "$2/dotnet.out" ;;
   esac
 }
@@ -91,7 +92,7 @@ _char_make_project() { # <lang> <dir> <local yes|no>
       printf '<counter type="LINE" missed="10" covered="90"/>\n' > "$_d/target/site/jacoco/jacoco.xml"
       if [ "$_loc" = yes ]; then _char_make_stub "$_d/mvnw"; fi ;;
     kotlin)
-      : > "$_d/build.gradle.kts"; mkdir -p "$_d/src/test" "$_d/build/reports/jacoco/test"; : > "$_d/src/test/A.kt"
+      printf 'plugins { id("org.jlleitschuh.gradle.ktlint") }\n' > "$_d/build.gradle.kts"; mkdir -p "$_d/src/test" "$_d/build/reports/jacoco/test"; : > "$_d/src/test/A.kt"
       printf '<counter type="LINE" missed="20" covered="80"/>\n' > "$_d/build/reports/jacoco/test/jacocoTestReport.xml"
       if [ "$_loc" = yes ]; then _char_make_stub "$_d/gradlew"; fi ;;
     go)     : > "$_d/go.mod"; : > "$_d/a_test.go" ;;
@@ -99,16 +100,16 @@ _char_make_project() { # <lang> <dir> <local yes|no>
     dotnet)
       : > "$_d/app.csproj"; : > "$_d/ATests.cs"; mkdir -p "$_d/TestResults/g"
       printf '<coverage line-rate="0.88" lines-covered="88" lines-valid="100" version="1.9">\n' > "$_d/TestResults/g/coverage.cobertura.xml" ;;
-    ruby)   : > "$_d/Gemfile"; : > "$_d/a_spec.rb"; printf 'task :build\n' > "$_d/Rakefile" ;;
+    ruby)   printf "gem 'rubocop'\n" > "$_d/Gemfile"; : > "$_d/a_spec.rb"; printf 'task :build\n' > "$_d/Rakefile" ;;
     php)
       printf '{}\n' > "$_d/composer.json"; : > "$_d/ATest.php"
       if [ "$_loc" = yes ]; then
         mkdir -p "$_d/vendor/bin"; _char_make_stub "$_d/vendor/bin/phpunit"; _char_make_stub "$_d/vendor/bin/phpstan"
       fi ;;
     swift)  : > "$_d/Package.swift"; : > "$_d/ATests.swift" ;;
-    cpp)    : > "$_d/CMakeLists.txt"; : > "$_d/a_test.cpp" ;;
-    elixir) : > "$_d/mix.exs"; : > "$_d/a_test.exs" ;;
-    scala)  : > "$_d/build.sbt"; mkdir -p "$_d/src/test"; : > "$_d/src/test/A.scala" ;;
+    cpp)    : > "$_d/CMakeLists.txt"; : > "$_d/a_test.cpp"; printf 'Checks: "-*,bugprone-*"\n' > "$_d/.clang-tidy" ;;
+    elixir) printf '{:credo, "~> 1.7"}\n' > "$_d/mix.exs"; : > "$_d/a_test.exs" ;;
+    scala)  printf 'addSbtPlugin("org.scalastyle" %% "scalastyle-sbt-plugin" %% "1.0.0")\n' > "$_d/build.sbt"; mkdir -p "$_d/src/test"; : > "$_d/src/test/A.scala" ;;
   esac
 }
 

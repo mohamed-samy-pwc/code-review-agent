@@ -154,14 +154,19 @@ _recipe_typescript() {
       if ! command -v npm >/dev/null 2>&1; then
         gate_skip "toolchain not installed (npm not found)"
       else
-        # Run with unit pattern; if no tests match, retry without pattern
-        gate_exec "$_d" npm test -- --coverage --coverageReporters=text \
-          --testPathPattern='(unit|spec)' --forceExit
-        if gate_output_matches 'Your test suite must contain at least one test|No tests found'; then
+        if grep -q '"vitest"' "$_d/package.json" 2>/dev/null; then
+          # Vitest has none of Jest's flags; run the whole suite with its text reporter.
+          gate_run "npm test failed (exit {exit})" "$_d" npm test -- --coverage --coverage.reporter=text
+        else
+          # Jest: run with unit pattern; if no tests match, retry without pattern
           gate_exec "$_d" npm test -- --coverage --coverageReporters=text \
-            --forceExit
+            --testPathPattern='(unit|spec)' --forceExit
+          if gate_output_matches 'Your test suite must contain at least one test|No tests found'; then
+            gate_exec "$_d" npm test -- --coverage --coverageReporters=text \
+              --forceExit
+          fi
+          gate_finish "npm test failed (exit {exit})"
         fi
-        gate_finish "npm test failed (exit {exit})"
       fi ;;
     lint)
       # Check for ESLint config before invoking — prevents false FAIL from missing config error
@@ -183,12 +188,13 @@ _recipe_typescript() {
       fi ;;
     coverage)
       # Istanbul/c8 table row: All files | stmts | branch | func | lines |
-      _lpct=$(grep 'All files' "$GATE_COVFILE" 2>/dev/null | \
+      _esc=$(printf '\033')
+      _lpct=$(sed "s/${_esc}\\[[0-9;]*m//g" "$GATE_COVFILE" 2>/dev/null | grep 'All files' | \
         sed 's/|/ /g' | awk '{for(i=1;i<=NF;i++) if($i+0>0 || $i=="0") print $i}' | \
         tail -1 | sed 's/[^0-9.]//g')
       # Simpler fallback: 5th pipe-delimited field
       if [ -z "$_lpct" ] || [ "$_lpct" = "0" ]; then
-        _lpct=$(grep 'All files' "$GATE_COVFILE" 2>/dev/null | \
+        _lpct=$(sed "s/${_esc}\\[[0-9;]*m//g" "$GATE_COVFILE" 2>/dev/null | grep 'All files' | \
           awk -F'|' '{gsub(/ /,"",$5); print $5+0}')
       fi
       printf '%s' "$_lpct" ;;
@@ -286,6 +292,7 @@ _recipe_rust() {
   _req="$1"; _d="$2"
   case "$_req" in
     workspace_root) grep -q '^\[workspace\]' "$_d/Cargo.toml" 2>/dev/null ;;
+    coverage_hint) printf 'install cargo-llvm-cov or cargo-tarpaulin' ;;
     detect)    [ -f "$_d/Cargo.toml" ] ;;
     has_tests) grep -r '#\[cfg(test)\]' "$_d/src" >/dev/null 2>&1 || [ -d "$_d/tests" ] ;;
     build)
@@ -296,18 +303,28 @@ _recipe_rust() {
       fi ;;
     test)
       if command -v cargo >/dev/null 2>&1; then
-        gate_run "cargo test failed" "$_d" cargo test --lib
+        # Tests run once; a coverage tool, when installed, measures that same run.
+        if cargo llvm-cov --version >/dev/null 2>&1; then
+          gate_run "cargo test failed" "$_d" cargo llvm-cov --lib
+        elif cargo tarpaulin --version >/dev/null 2>&1; then
+          gate_run "cargo test failed" "$_d" cargo tarpaulin --lib --out Stdout
+        else
+          gate_run "cargo test failed" "$_d" cargo test --lib
+        fi
       else
         gate_skip "toolchain not installed (cargo not found)"
       fi ;;
     lint)
-      if command -v cargo >/dev/null 2>&1; then
-        gate_run "clippy failed" "$_d" cargo clippy -- -D warnings
-      else
+      if ! command -v cargo >/dev/null 2>&1; then
         gate_skip "toolchain not installed (cargo not found)"
+      elif ! cargo clippy --version >/dev/null 2>&1; then
+        gate_skip "linter not installed (cargo clippy not found)"
+      else
+        gate_run "clippy failed" "$_d" cargo clippy -- -D warnings
       fi ;;
     coverage)
-      _lpct=$(grep 'TOTAL' "$GATE_COVFILE" 2>/dev/null | awk '{print $NF}' | sed 's/%//' | head -1)
+      # cargo-llvm-cov: "TOTAL regions missed cover% functions missed exec% lines missed cover% ..."
+      _lpct=$(grep 'TOTAL' "$GATE_COVFILE" 2>/dev/null | awk '{print (NF >= 10 ? $10 : $NF)}' | sed 's/%//' | head -1)
       [ -z "$_lpct" ] && _lpct=$(grep -o '[0-9]*\.[0-9]*% coverage' "$GATE_COVFILE" 2>/dev/null | \
         sed 's/% coverage//' | head -1)
       printf '%s' "$_lpct"
@@ -330,7 +347,10 @@ _recipe_swift() {
       fi ;;
     test)
       if command -v swift >/dev/null 2>&1; then
-        gate_run "swift test failed" "$_d" swift test --enable-code-coverage
+        gate_exec "$_d" swift test --enable-code-coverage
+        # Ask SwiftPM where it wrote the coverage JSON; the path lands in the captured output.
+        [ "$GATE_EXIT" = "0" ] && gate_exec_more "$_d" swift test --show-codecov-path
+        gate_finish "swift test failed"
       else
         gate_skip "toolchain not installed (swift not found)"
       fi ;;
@@ -340,7 +360,21 @@ _recipe_swift() {
       else
         gate_skip "linter not installed (swiftlint not found)"
       fi ;;
-    coverage) return 1 ;;
+    coverage)
+      # SwiftPM's coverage JSON: sum line counts over the package's own sources
+      # (not Tests/ and not .build/).
+      _cj=$(grep '\.json$' "$GATE_COVFILE" 2>/dev/null | tail -1)
+      [ -f "$_cj" ] && awk '{
+        n = split($0, p, /"filename":"/)
+        for (i = 2; i <= n; i++) {
+          f = p[i]; sub(/".*/, "", f)
+          if (f ~ /\/Tests\// || f ~ /\.build\//) continue
+          if (match(p[i], /"lines":\{"count":[0-9]+,"covered":[0-9]+/)) {
+            q = substr(p[i], RSTART, RLENGTH); gsub(/[^0-9,]/, "", q); split(q, a, ","); c += a[1]; v += a[2]
+          }
+        }
+      } END { if (c > 0) printf "%.1f", v / c * 100 }' "$_cj"
+      return 0 ;;
   esac
 }
 
@@ -366,14 +400,25 @@ _recipe_cpp() {
         gate_skip "toolchain not installed"
       fi ;;
     test)
-      if command -v ctest >/dev/null 2>&1; then
-        gate_no_coverage
-        gate_run "ctest failed" "$_d" ctest --test-dir build
+      if [ -f "$_d/CMakeLists.txt" ] || [ ! -f "$_d/Makefile" ]; then
+        if command -v ctest >/dev/null 2>&1; then
+          gate_run "ctest failed" "$_d" ctest --test-dir build
+        else
+          gate_skip "toolchain not installed (ctest not found)"
+        fi
+      elif grep -q '^test:' "$_d/Makefile" 2>/dev/null && command -v make >/dev/null 2>&1; then
+        # Makefile project with a `test` target
+        gate_run "make test failed" "$_d" make test
       else
-        gate_skip "toolchain not installed (ctest not found)"
+        gate_skip "no test command detected (no CMakeLists.txt, or no test target in Makefile)"
       fi ;;
     lint)
-      if command -v clang-tidy >/dev/null 2>&1; then
+      if ! command -v clang-tidy >/dev/null 2>&1; then
+        gate_skip "linter not installed (clang-tidy not found)"
+      elif [ ! -f "$_d/.clang-tidy" ]; then
+        # Without a config clang-tidy exits with "no checks enabled", which is not a lint failure.
+        gate_skip "no .clang-tidy config found"
+      else
         _cfiles=$(find "$_d" -maxdepth 4 \( -name '*.cpp' -o -name '*.c' \) \
           ! -path '*/build/*' 2>/dev/null | head -100 | tr '\n' ' ')
         if [ -n "$_cfiles" ]; then
@@ -381,11 +426,16 @@ _recipe_cpp() {
         else
           gate_skip "no .c/.cpp source files found"
         fi
-      else
-        gate_skip "linter not installed (clang-tidy not found)"
       fi ;;
     coverage) return 1 ;;
   esac
+}
+
+# Gradle launcher for a Project: its wrapper, else a system `gradle` when the Project has a build file.
+_gradle() { # <dir>
+  if [ -f "$1/gradlew" ]; then printf './gradlew'
+  elif { [ -f "$1/build.gradle" ] || [ -f "$1/build.gradle.kts" ]; } && command -v gradle >/dev/null 2>&1; then printf 'gradle'
+  else return 1; fi
 }
 
 # Line coverage from a JaCoCo XML report; prints "null" when there is none.
@@ -413,10 +463,10 @@ _recipe_java() {
     build)
       if [ -f "$_d/mvnw" ]; then
         gate_run "mvnw failed" "$_d" ./mvnw package -DskipTests
-      elif command -v mvn >/dev/null 2>&1; then
+      elif [ -f "$_d/pom.xml" ] && command -v mvn >/dev/null 2>&1; then
         gate_run "mvn failed" "$_d" mvn package -DskipTests
-      elif [ -f "$_d/gradlew" ]; then
-        gate_run "gradlew assemble failed" "$_d" ./gradlew assemble
+      elif _g=$(_gradle "$_d"); then
+        gate_run "gradlew assemble failed" "$_d" "$_g" assemble
       else
         gate_skip "toolchain not installed"
       fi ;;
@@ -424,8 +474,10 @@ _recipe_java() {
     lint)
       if [ -f "$_d/mvnw" ]; then
         gate_run "checkstyle failed" "$_d" ./mvnw checkstyle:check
-      elif [ -f "$_d/gradlew" ]; then
-        gate_run "checkstyle failed" "$_d" ./gradlew checkstyleMain
+      elif [ -f "$_d/pom.xml" ] && command -v mvn >/dev/null 2>&1; then
+        gate_run "checkstyle failed" "$_d" mvn checkstyle:check
+      elif _g=$(_gradle "$_d") && grep -qs checkstyle "$_d/build.gradle" "$_d/build.gradle.kts"; then
+        gate_run "checkstyle failed" "$_d" "$_g" checkstyleMain
       else
         gate_skip "linter not installed"
       fi ;;
@@ -442,15 +494,15 @@ _recipe_kotlin() {
         { [ -f "$_d/build.gradle" ] && ls "$_d"/*.kt >/dev/null 2>&1; } ;;
     has_tests) [ -d "$_d/src/test" ] ;;
     build)
-      if [ -f "$_d/gradlew" ]; then
-        gate_run "gradlew assemble failed" "$_d" ./gradlew assemble
+      if _g=$(_gradle "$_d"); then
+        gate_run "gradlew assemble failed" "$_d" "$_g" assemble
       else
         gate_skip "toolchain not installed"
       fi ;;
     test) _jvm_test "$_d" ;;
     lint)
-      if [ -f "$_d/gradlew" ]; then
-        gate_run "ktlint failed" "$_d" ./gradlew ktlintCheck
+      if _g=$(_gradle "$_d") && grep -qs ktlint "$_d/build.gradle" "$_d/build.gradle.kts"; then
+        gate_run "ktlint failed" "$_d" "$_g" ktlintCheck
       else
         gate_skip "linter not installed"
       fi ;;
@@ -461,8 +513,8 @@ _recipe_kotlin() {
 # Test Gate shared by the JVM Languages (Java, Kotlin).
 _jvm_test() {
   if [ -f "$1/mvnw" ]; then gate_run "test failed" "$1" ./mvnw test
-  elif command -v mvn >/dev/null 2>&1; then gate_run "test failed" "$1" mvn test
-  elif [ -f "$1/gradlew" ]; then gate_run "test failed" "$1" ./gradlew test
+  elif [ -f "$1/pom.xml" ] && command -v mvn >/dev/null 2>&1; then gate_run "test failed" "$1" mvn test
+  elif _g=$(_gradle "$1"); then gate_run "test failed" "$1" "$_g" test
   else gate_skip "toolchain not installed"; fi
 }
 
@@ -480,19 +532,36 @@ _recipe_scala() {
       fi ;;
     test)
       if command -v sbt >/dev/null 2>&1; then
-        gate_exec "$_d" sbt 'testOnly *Unit*'
-        [ "$GATE_EXIT" = "0" ] || gate_exec_more "$_d" sbt test
+        if grep -rqs scoverage "$_d/project" 2>/dev/null; then
+          # sbt-scoverage measures the same run; its report prints "Statement coverage.: NN.NN%".
+          gate_exec "$_d" sbt coverage 'testOnly *Unit*' coverageReport
+          # sbt exits 0 when the pattern matches nothing, so also fall back on "No tests to run".
+          if [ "$GATE_EXIT" != "0" ] || gate_output_matches 'No tests to run'; then
+            gate_exec "$_d" sbt coverage test coverageReport
+          fi
+        else
+          gate_exec "$_d" sbt 'testOnly *Unit*'
+          if [ "$GATE_EXIT" != "0" ] || gate_output_matches 'No tests to run'; then
+            gate_exec "$_d" sbt test
+          fi
+        fi
         gate_finish "sbt test failed"
       else
         gate_skip "toolchain not installed (sbt not found)"
       fi ;;
     lint)
-      if command -v sbt >/dev/null 2>&1; then
-        gate_run "scalastyle failed" "$_d" sbt scalastyle
-      else
+      if ! command -v sbt >/dev/null 2>&1; then
         gate_skip "toolchain not installed (sbt not found)"
+      elif ! grep -rqs scalastyle "$_d/build.sbt" "$_d/project" 2>/dev/null; then
+        gate_skip "linter not installed (scalastyle plugin not configured)"
+      else
+        gate_run "scalastyle failed" "$_d" sbt scalastyle
       fi ;;
-    coverage) return 1 ;;
+    coverage)
+      # sbt-scoverage reports statement coverage (the closest it has to line coverage).
+      grep -o 'Statement coverage[.]*: *[0-9.]*%' "$GATE_COVFILE" 2>/dev/null | tail -1 | sed 's/.*: *//; s/%//'
+      return 0 ;;
+    coverage_hint) printf 'add the sbt-scoverage plugin to project/plugins.sbt' ;;
   esac
 }
 
@@ -556,19 +625,35 @@ _recipe_ruby() {
       fi ;;
     test)
       if command -v bundle >/dev/null 2>&1; then
-        gate_exec "$_d" bundle exec rspec --tag unit spec/
-        [ "$GATE_EXIT" = "0" ] || gate_exec_more "$_d" bundle exec rspec spec/
-        gate_finish "rspec failed"
+        if [ -x "$_d/bin/rails" ] && [ ! -d "$_d/spec" ]; then
+          gate_run "rails test failed" "$_d" bundle exec rails test
+        elif [ ! -d "$_d/spec" ] && [ -d "$_d/test" ]; then
+          # Minitest without Rails
+          gate_run "minitest failed" "$_d" bundle exec ruby -Itest -e "Dir.glob('./test/**/*_test.rb').sort.each { |f| require f }"
+        else
+          gate_exec "$_d" bundle exec rspec --tag unit spec/
+          # RSpec exits 0 when no example carries the tag, so also fall back on "0 examples".
+          if [ "$GATE_EXIT" != "0" ] || gate_output_matches '(^|[^0-9])0 examples,'; then
+            gate_exec_more "$_d" bundle exec rspec spec/
+          fi
+          gate_finish "rspec failed"
+        fi
       else
         gate_skip "toolchain not installed (bundle not found)"
       fi ;;
     lint)
-      if command -v bundle >/dev/null 2>&1; then
-        gate_run "rubocop failed" "$_d" bundle exec rubocop
-      else
+      if ! command -v bundle >/dev/null 2>&1; then
         gate_skip "linter not installed (bundle not found)"
+      elif ! grep -qs rubocop "$_d/Gemfile" "$_d/Gemfile.lock"; then
+        gate_skip "linter not installed (rubocop not in Gemfile)"
+      else
+        gate_run "rubocop failed" "$_d" bundle exec rubocop
       fi ;;
-    coverage) return 1 ;;
+    coverage)
+      # SimpleCov prints "Line coverage: 2 / 2 (100.00%)", sometimes with ANSI colour.
+      sed 's/\x1b\[[0-9;]*m//g' "$GATE_COVFILE" 2>/dev/null | \
+        sed -n 's/.*[Ll]ine coverage:[^(]*(\([0-9.]*\)%).*/\1/p' | tail -1
+      return 0 ;;
   esac
 }
 
@@ -576,17 +661,24 @@ _recipe_php() {
   _req="$1"; _d="$2"
   case "$_req" in
     workspace_root) return 1 ;;
+    coverage_hint) printf 'install xdebug or pcov so PHPUnit can measure coverage' ;;
     detect)    [ -f "$_d/composer.json" ] ;;
     has_tests) find "$_d" -name '*Test.php' 2>/dev/null | grep -q . ;;
     build)
       if command -v composer >/dev/null 2>&1; then
-        gate_run "composer install failed" "$_d" composer install --no-dev
+        # Dev dependencies stay: the test and lint Gates need phpunit and phpstan from vendor/.
+        gate_run "composer install failed" "$_d" composer install --no-interaction
       else
         gate_skip "toolchain not installed (composer not found)"
       fi ;;
     test)
       if [ -f "$_d/vendor/bin/phpunit" ]; then
-        gate_run "phpunit failed" "$_d" ./vendor/bin/phpunit --coverage-text
+        gate_exec "$_d" ./vendor/bin/phpunit --coverage-text
+        # Without xdebug or pcov PHPUnit exits 1 even when every test passes; rerun without coverage.
+        if [ "$GATE_EXIT" != "0" ] && gate_output_matches 'No code coverage driver available'; then
+          gate_exec "$_d" ./vendor/bin/phpunit
+        fi
+        gate_finish "phpunit failed"
       else
         gate_skip "toolchain not installed (phpunit not found)"
       fi ;;
@@ -617,21 +709,23 @@ _recipe_elixir() {
       fi ;;
     test)
       if command -v mix >/dev/null 2>&1; then
-        gate_exec "$_d" mix test --only unit
-        [ "$GATE_EXIT" = "0" ] || gate_exec_more "$_d" mix test
+        gate_exec "$_d" mix test --cover --only unit
+        [ "$GATE_EXIT" = "0" ] || gate_exec_more "$_d" mix test --cover
         gate_finish "mix test failed"
       else
         gate_skip "toolchain not installed (mix not found)"
       fi ;;
     lint)
-      if command -v mix >/dev/null 2>&1; then
-        gate_run "mix credo failed" "$_d" mix credo
-      else
+      if ! command -v mix >/dev/null 2>&1; then
         gate_skip "toolchain not installed (mix not found)"
+      elif ! grep -qs credo "$_d/mix.exs"; then
+        gate_skip "linter not installed (credo not in mix.exs)"
+      else
+        gate_run "mix credo failed" "$_d" mix credo
       fi ;;
     coverage)
       grep -o '[0-9]*\.[0-9]*% | Total' "$GATE_COVFILE" 2>/dev/null | \
-        sed 's/% | Total//' | head -1
+        sed 's/% | Total//' | tail -1
       return 0 ;;
   esac
 }
@@ -662,9 +756,6 @@ _gate_cmd() { # <append yes|no> <dir> <cmd> [args...]
 }
 gate_exec()      { _gate_cmd no "$@"; }
 gate_exec_more() { _gate_cmd yes "$@"; }
-
-# The test run produced no coverage output to parse later.
-gate_no_coverage() { GATE_COV=false; }
 
 gate_output_matches() { grep -qE "$1" "$WORK/out" 2>/dev/null; }
 
@@ -708,7 +799,8 @@ _gate_coverage() {
     gate_skip "coverage parsing not implemented for $GATE_LANG"; GATE_DETAIL="$GATE_REASON"; return
   fi
   if [ -z "$GATE_LPCT" ]; then
-    gate_skip "coverage output unparseable"
+    _hint=$("_recipe_$GATE_LANG" coverage_hint "$_abs" 2>/dev/null)
+    gate_skip "coverage output unparseable${_hint:+ ($_hint)}"
     cp "$GATE_COVFILE" "$LOG_DIR/${GATE_PROJECT}-${GATE_LANG}-coverage-raw.log" 2>/dev/null || true
     GATE_LOG="validation-logs/${GATE_PROJECT}-${GATE_LANG}-coverage-raw.log"
   elif [ "$(awk "BEGIN{print ($GATE_LPCT+0 >= $GATE_THRESHOLD+0) ? \"yes\" : \"no\"}")" = "yes" ]; then
@@ -724,7 +816,7 @@ _run_gate() {
   _gate="$1"; _project="$2"; _abs="$3"; _lang="$4"
   GATE_NAME="$_gate"; GATE_PROJECT="$_project"; GATE_LANG="$_lang"
   GATE_STATUS=SKIPPED; GATE_REASON=""; GATE_EXIT_CODE=null; GATE_LOG=null
-  GATE_RAN=false; GATE_COV=true; GATE_DETAIL=''; GATE_LPCT=''; GATE_THRESHOLD=''
+  GATE_RAN=false; GATE_DETAIL=''; GATE_LPCT=''; GATE_THRESHOLD=''
   [ "$_gate" = "build" ] && GATE_REASON="no build command applies"
   _t0=$(date +%s)
   _status_line "$_project" "$_lang" "$_gate" "RUNNING"
@@ -736,7 +828,7 @@ _run_gate() {
   else
     "_recipe_$_lang" "$_gate" "$_abs"
     # Coverage is parsed later from the test Gate's captured output.
-    if [ "$_gate" = "test" ] && [ "$GATE_RAN" = "true" ] && [ "$GATE_COV" = "true" ] && [ "$DRY_RUN" != "true" ]; then
+    if [ "$_gate" = "test" ] && [ "$GATE_RAN" = "true" ] && [ "$DRY_RUN" != "true" ]; then
       cp "$WORK/out" "$WORK/COV_${_project_index}" 2>/dev/null || true
     fi
   fi

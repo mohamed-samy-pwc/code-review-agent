@@ -1,7 +1,7 @@
 exit 0
 calls:
 mix compile
-mix test --only unit
+mix test --cover --only unit
 mix credo
 gates:
 build PASS exit=0 reason=null log=null line_pct= threshold=

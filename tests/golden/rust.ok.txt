@@ -1,7 +1,9 @@
 exit 0
 calls:
 cargo build
-cargo test --lib
+cargo llvm-cov --version
+cargo llvm-cov --lib
+cargo clippy --version
 cargo clippy -- -D warnings
 gates:
 build PASS exit=0 reason=null log=null line_pct= threshold=
