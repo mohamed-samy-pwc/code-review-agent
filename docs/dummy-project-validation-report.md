@@ -1,63 +1,75 @@
 # Dummy-project validation report
 
-**Date:** 2026-10-13. **Scope:** `validate.sh` and `validate.ps1` (commit `446671a`, PowerShell 7.6.6, macOS) run against the 66 dummy projects in `~/AI-projects/pwc/dummy-projects/`.
-**Raw data:** every project was run with both scripts. Exit code, per-Gate status, reasons, coverage and the list of Sidecar Logs were compared. Re-run with `~/AI-projects/pwc/dummy-projects/run-all.sh` (for `validate.sh` only).
+**Date:** 2026-10-13. **Scripts:** `validate.sh` and `validate.ps1` at commit `4556c1e` (PowerShell 7.6.6, macOS arm64).
+**Scope:** every one of the 101 projects in `~/AI-projects/pwc/dummy-projects/` was run with **both** scripts, against **real toolchains** (see "Toolchains used"). Exit code, per-Gate status and reason, coverage and the Sidecar Log file names were compared between the scripts and against the expected exit code in `cases.tsv`.
 
 ## Verdict
 
-The scripts are correct on the paths this machine can really exercise, and they agree with each other on almost everything. **62 of 66 cases are identical between the two scripts** (same exit code, same Gate statuses and reasons, same Sidecar Logs). **4 cases differ**, and each one is a real finding or an environment limit, listed below.
-
 | Check | Result |
 |---|---|
-| Cases with an asserted exit code | 45 (the other 21 depend on installed tools and are informational) |
-| `validate.sh` matches the expected exit code | 44 / 45 |
-| `validate.ps1` matches the expected exit code | 42 / 45 |
-| Both scripts identical (exit, Gates, reasons, logs) | 62 / 66 |
+| Projects run | 101 |
+| `validate.sh` gives the expected exit code | 100 / 100 |
+| `validate.ps1` gives the expected exit code | 99 / 100 |
+| Both scripts identical (exit code, every Gate status and reason, Sidecar Logs) | 99 / 101 |
+| Test harness (`tests/run.sh`, fake toolchains plus fixtures plus parity) | 134 passed, 0 failed |
 
-## Findings
+The 2 cases that differ are the same single limit: PowerShell 7 on macOS starts in the wrong directory when the current directory's name contains a backslash (`hostile-subdir-name`, `hostile-root-dir/…`). `validate.sh` handles those names; `validate.ps1` exits 2 (a safe failure) because `pwsh` itself cannot see the project. It is a runtime limit, not a script bug.
 
-### 1. `validate.sh` follows symlinked subdirectories (real bug)
-- **Case:** `symlinked-subdir` (`link-ts` is a symlink to `real-ts`). Expected exit 0.
-- **Observed:** `validate.sh` validated the same Project twice, as `link-ts` and `real-ts`. `link-ts` came out as a test-Gate FAIL ("No test files detected"), so the run exited 1. `validate.ps1` skipped the symlink and exited 0.
-- **Why it matters:** the spec says symlinks are not followed. The check `[ -L "$_sub" ]` runs on a path with a trailing slash (`.../link-ts/`), and the slash makes the test follow the link, so it is always false.
-- **Fix (not done):** strip the trailing slash before the `-L` test. This bug is older than the refactor; it was in the pre-refactor detection loop too.
+## Correction to the first version of this report
 
-### 2. `validate.ps1` accepts an invalid Language key in `.validation.conf` (parity gap)
-- **Case:** `conf-bad-language-key` (`COVERAGE_THRESHOLD_TYPE-SCRIPT=50`). Expected exit 2.
-- **Observed:** `validate.sh` rejects it ("Invalid config key", exit 2). `validate.ps1` ignores the odd key and runs normally (exit 0).
-- **Why it matters:** the same config gives different outcomes on different platforms, and a typo in a key silently does nothing on Windows.
-- **Fix (not done):** validate the key suffix in `Read-Conf` (letters, digits and underscore only), as `validate.sh` does.
+The first version said .NET, Ruby, Swift and C/C++ were not executed and that 62 of 66 cases agreed. That was wrong in two ways. Several of those toolchains were installed (.NET, Ruby, Swift, `make`, a JDK), and the cases marked "?" were not asserted, so projects that were broken or that the script mishandled looked fine. This version installs every toolchain, makes every dummy project a real, valid project of its kind, and asserts the exit code of every case.
 
-### 3. `validate.ps1` cannot run in a directory whose name contains a backslash (PowerShell limit, not a script bug)
-- **Cases:** `hostile-subdir-name`, `hostile-root-dir/we"ird 'dir' \ & $(x)`. Expected exit 0; `validate.ps1` exits 2.
-- **Observed:** `pwsh` itself starts with the wrong working directory (its own install directory) whenever the current directory's name contains `\`. I confirmed this with a bare `pwsh -Command '(Get-Location).Path'`. Quotes, spaces, `&`, `$(...)` and `'` are all fine. The script then finds no Project and exits 2, which is a safe failure.
-- **Why it matters:** only for paths with a literal backslash on macOS/Linux, which is rare. `validate.sh` handles the same names correctly, which is what the hostile-input tests are for.
-- **Action:** none in the script. Worth knowing if such a path ever appears in CI.
+## Toolchains used
 
-## What was really executed vs skipped
+Installed or already present, all real: Node/npm, Python (pytest, pytest-cov, ruff, Flask), Go 1.27, Rust 1.99 (clippy, `cargo-llvm-cov`), Java 17 with Maven 3.9 and Gradle 9.8, .NET SDK 10, Ruby 3.3 (RSpec, Minitest, SimpleCov, RuboCop), PHP 8.5 with `pcov` (PHPUnit, PHPStan via Composer), Swift 6.2 with SwiftLint, CMake and `clang-tidy`, Elixir 1.20/OTP 29 (Credo), sbt (ScalaTest, scalastyle, sbt-scoverage), `golangci-lint`. Homebrew bottles were only partly reachable, so Go, Rust, Maven, Gradle, Elixir and Erlang came from their upstream releases into `~/toolchains` (`env.sh` puts them on `PATH`).
 
-This machine has `node`/`npm` and Python with `pytest`, `pytest-cov` and `ruff`. It has none of Go, Rust, Java/Maven/Gradle, .NET, Ruby, PHP, Swift, CMake, Elixir or sbt.
+## What running real projects found
 
-| Language | Really executed here | What the run proves |
-|---|---|---|
-| TypeScript/JavaScript | Yes: build, test, lint, coverage | Full behaviour including FAIL paths, threshold overrides, retry and fallback logic |
-| Python | Yes: test, lint, coverage (build is SKIPPED, no `build` module) | Full behaviour including marker fallback and `requirements.txt` detection |
-| Go, Rust, Java, Kotlin, .NET, Ruby, PHP, Swift, C/C++, Elixir, Scala | No: tools missing, Gates SKIPPED | Detection, the Hard Gate (`*-no-tests` projects FAIL as required), SKIPPED reasons, and that both scripts agree |
+The fake-toolchain tests only prove that the scripts issue the commands the scripts expect. Real tools showed that many of those commands were wrong. All of these are fixed, with the fake-toolchain goldens and new regression tests updated.
 
-The exact commands each of those 11 Languages would issue are covered by the fake-toolchain tests (`tests/golden/`), not by this run. A machine with the real toolchains would be needed to check them against real tools.
+**Detection and layout**
+- A symlinked subdirectory was scanned as a second Project (`validate.sh` only).
+- A standard C# layout (a solution at the root, `src/App` and `tests/App.Tests` below) was gated three times, and the library project failed the Hard Gate for having no tests. A workspace root (`.sln`, `.slnx`, Maven modules, Gradle `include`, Cargo workspace, `go.work`) now owns its same-family subdirectories.
+- `.slnx`, the default solution format of .NET 10, was not a signal, so those projects were not detected at all.
 
-## Cases that behaved as designed (selection)
+**Test discovery and runners**
+- C# test projects whose files are not named `*Test(s).cs` (the xUnit template creates `UnitTest1.cs`) failed the Hard Gate. They are now recognised by `[Fact]`, `[Test]`, `[TestMethod]` attributes.
+- Vitest projects always FAILed: the TypeScript recipe passed Jest-only flags.
+- Ruby Minitest and Rails projects always FAILed (RSpec was assumed). Ruby `rspec --tag unit` with no tagged examples ran nothing and passed.
+- sbt `testOnly *Unit*` with no match ran nothing and exited 0, giving 0% coverage and a false FAIL.
+- A Gradle project FAILed on any machine that had Maven installed (`mvn` was run without a `pom.xml`), and Gradle projects without a wrapper were skipped even when `gradle` was installed.
+- C/C++ projects built with a plain `Makefile` could not run tests; a `test` target is now used.
 
-- **Hard Gate:** every `*-no-tests` project exits 1 on both scripts; tests inside `node_modules` do not count.
-- **Precedence:** `ambiguous-ts-over-python`, `ambiguous-java-over-go` and `ambiguous-kotlin-over-java` pick the same Language in both scripts, matching the detection order.
-- **Monorepos:** `monorepo-mixed`, `monorepo-one-fails` and `root-and-sub` keep each Project's Gate Results separate; one Project failing fails the run.
-- **Config:** comments and blank lines are accepted; a non-numeric threshold, a threshold over 100 and an injection attempt (`$(...)` in a value) all exit 2 on both scripts and execute nothing.
-- **Detection limits:** `too-deep` (a Project two levels down) and `no-signals` exit 2 as specified; `cpp-makefile-without-sources-undetected` is correctly not detected.
-- **Failure isolation:** a failing build, test or lint Gate never stops the other Gates; the report lists all four.
+**Coverage that was never produced**
+- Rust: the spec asks for `cargo-llvm-cov` then `cargo-tarpaulin`, but only `cargo test` was run, so coverage was always SKIPPED.
+- Elixir: `mix test` was run without `--cover`.
+- .NET, Ruby, Swift, Scala: coverage was "not implemented". It is now read from coverlet Cobertura, SimpleCov, the SwiftPM JSON and sbt-scoverage.
+- JaCoCo (Java, Kotlin): the parser took the last `missed=` on a one-line XML file, which is the wrong counter, so low-coverage projects passed. It also read a report left on disk by an earlier run, so a failing test run could still show coverage PASS. A missing report reported "null%" as a FAIL instead of SKIPPED.
+
+**False FAILs from missing optional tools or config**
+- PHP: `composer install --no-dev` deleted PHPUnit and PHPStan, so tests and lint were SKIPPED. `phpunit --coverage-text` exits 1 without a coverage driver even when every test passes.
+- RuboCop, Credo, ktlint, scalastyle, clippy and `.clang-tidy` that are not set up in the Project produced FAILs; they are SKIPPED now.
+- SwiftLint linted SwiftPM's generated `.build/` files.
+
+**Parity and consistency**
+- `validate.ps1` accepted an invalid Language key in `.validation.conf`; `validate.sh` rejects it.
+- `validate.ps1` wrote `"log_file": ""` instead of `null`.
+- Skipped coverage Gates in `validate.sh` reported the global threshold instead of the Language's.
+
+## Known limits (not hidden)
+
+- **C/C++:** tests run, coverage is not read (SKIPPED, "not implemented").
+- **Scala coverage** is statement coverage (what sbt-scoverage measures), not line coverage.
+- **PHP** coverage needs `pcov` or Xdebug; without one the Gate is SKIPPED with an install hint. Here `pcov` was built locally.
+- **.NET** flat projects (code and tests in one project) report no coverage, because coverlet does not measure the test assembly. Use a library plus a test project.
+- **Mocha, Ava and Tap** test runners are not recognised (Jest and Vitest are).
+- **Integration tests** are out of scope by design, so a Rust crate with tests only in `tests/` has 0% unit coverage and fails (`rust-integration-tests-dir`).
+- **Platforms:** `validate.ps1` was only run under PowerShell 7 on macOS. Windows PowerShell 5.1, Linux and `validate.bat` were not exercised.
+- Dummy projects need network access for their own dependencies (Maven Central, NuGet, npm, PyPI, RubyGems, crates.io, Hex, Packagist), because they are real projects. The scripts themselves still use no network.
 
 ## All cases
 
-Gates: `B` build, `T` test, `L` lint, `C` coverage, each `P` (PASS), `F` (FAIL) or `S` (SKIPPED). "Same" means the two scripts gave identical exit code, Gates, reasons and logs. `!!` marks a mismatch with the expected exit code.
+Gates: `B` build, `T` test, `L` lint, `C` coverage, each `P` (PASS), `F` (FAIL) or `S` (SKIPPED). "Same" means the two scripts gave identical exit code, Gates, reasons and logs. `!!` marks a mismatch with the expected exit code. Exit codes in the table are `validate.sh` then `validate.ps1`.
 
 | Case | Want | `validate.sh` exit | `validate.ps1` exit | Gates (`validate.sh`) | Same | What it exercises |
 |---|---|---|---|---|---|---|
@@ -81,49 +93,84 @@ Gates: `B` build, `T` test, `L` lint, `C` coverage, each `P` (PASS), `F` (FAIL) 
 | `python-marker-fallback` | 0 | 0 ok | 0 ok | python B:S T:P L:P C:P | yes | no unit-marked tests: pytest exit 5 triggers the full-suite retry |
 | `python-low-coverage` | 1 | 1 ok | 1 ok | python B:S T:P L:P C:F | yes | coverage Gate FAIL |
 | `python-lint-fails` | 1 | 1 ok | 1 ok | python B:S T:P L:F C:P | yes | lint Gate FAIL (ruff F401) |
-| `java-maven-no-tests` | 1 | 1 ok | 1 ok | java B:S T:F L:S C:S | yes | Hard Gate (no src/test), independent of installed tools |
-| `scala-sbt-no-tests` | 1 | 1 ok | 1 ok | scala B:S T:F L:S C:S | yes | Hard Gate, independent of installed tools |
-| `go-no-tests` | 1 | 1 ok | 1 ok | go B:S T:F L:S C:S | yes | Hard Gate, independent of installed tools |
-| `rust-no-tests` | 1 | 1 ok | 1 ok | rust B:S T:F L:S C:S | yes | Hard Gate, independent of installed tools |
+| `java-maven-no-tests` | 1 | 1 ok | 1 ok | java B:P T:F L:F C:S | yes | Hard Gate (no src/test), independent of installed tools |
+| `scala-sbt-no-tests` | 1 | 1 ok | 1 ok | scala B:P T:F L:S C:S | yes | Hard Gate, independent of installed tools |
+| `go-no-tests` | 1 | 1 ok | 1 ok | go B:P T:F L:P C:S | yes | Hard Gate, independent of installed tools |
+| `rust-no-tests` | 1 | 1 ok | 1 ok | rust B:P T:F L:P C:S | yes | Hard Gate, independent of installed tools |
 | `dotnet-no-tests` | 1 | 1 ok | 1 ok | dotnet B:P T:F L:P C:S | yes | Hard Gate, independent of installed tools |
-| `ruby-no-tests` | 1 | 1 ok | 1 ok | ruby B:S T:F L:F C:S | yes | Hard Gate, independent of installed tools |
-| `php-no-tests` | 1 | 1 ok | 1 ok | php B:S T:F L:S C:S | yes | Hard Gate, independent of installed tools |
-| `swift-no-tests` | 1 | 1 ok | 1 ok | swift B:P T:F L:S C:S | yes | Hard Gate, independent of installed tools |
-| `cpp-no-tests` | 1 | 1 ok | 1 ok | cpp B:S T:F L:S C:S | yes | Hard Gate, independent of installed tools |
-| `elixir-no-tests` | 1 | 1 ok | 1 ok | elixir B:S T:F L:S C:S | yes | Hard Gate, independent of installed tools |
-| `java-maven` | ? | 0  | 0  | java B:S T:S L:S C:S | yes | Java via pom.xml; SKIPPED without mvn, a real run with it |
-| `java-gradle` | ? | 0  | 0  | java B:S T:S L:S C:S | yes | Java via build.gradle (no .kt files) |
-| `kotlin-gradle-kts` | ? | 0  | 0  | kotlin B:S T:S L:S C:S | yes | Kotlin via build.gradle.kts |
-| `kotlin-gradle-groovy` | ? | 0  | 0  | kotlin B:S T:S L:S C:S | yes | Kotlin via build.gradle plus a .kt file |
-| `scala-sbt` | ? | 0  | 0  | scala B:S T:S L:S C:S | yes | Scala via build.sbt |
-| `go-module` | ? | 0  | 0  | go B:S T:S L:S C:S | yes | Go; -short tests and coverprofile when go is installed |
-| `go-test-fails` | ? | 0  | 0  | go B:S T:S L:S C:S | yes | Go test failure; SKIPPED (exit 0) when go is missing |
-| `rust-cargo` | ? | 0  | 0  | rust B:S T:S L:S C:S | yes | Rust with an in-file #[cfg(test)] module |
-| `rust-integration-tests-dir` | ? | 0  | 0  | rust B:S T:S L:S C:S | yes | Rust whose tests live in tests/ |
-| `dotnet-csproj` | ? | 0  | 0  | dotnet B:P T:P L:P C:S | yes | .NET via *.csproj |
-| `dotnet-sln-only` | ? | 0  | 0  | dotnet B:P T:P L:P C:S | yes | .NET via *.sln |
-| `dotnet-global-json` | ? | 1  | 1  | dotnet B:F T:F L:F C:S | yes | .NET via global.json |
-| `ruby-gem` | ? | 1  | 1  | ruby B:F T:F L:F C:S | yes | Ruby with a Rakefile build task |
-| `ruby-no-rakefile-build` | ? | 1  | 1  | ruby B:S T:F L:F C:S | yes | Ruby: build SKIPPED (no build command detected) |
-| `php-composer` | ? | 0  | 0  | php B:S T:S L:S C:S | yes | PHP via composer.json |
-| `swift-package` | ? | 1  | 1  | swift B:P T:F L:S C:S | yes | Swift via Package.swift |
-| `cpp-cmake` | ? | 0  | 0  | cpp B:S T:S L:S C:S | yes | C/C++ via CMakeLists.txt |
-| `cpp-makefile` | ? | 0  | 0  | cpp B:P T:S L:S C:S | yes | C/C++ via Makefile plus a .c file |
-| `elixir-mix` | ? | 0  | 0  | elixir B:S T:S L:S C:S | yes | Elixir via mix.exs |
-| `monorepo-mixed` | 0 | 0 ok | 0 ok | python B:S T:P L:P C:P / typescript B:P T:P L:P C:P / go B:S T:S L:S C:S | yes | three Projects in subdirectories (TypeScript, Python, Go); docs/ ignored |
+| `ruby-no-tests` | 1 | 1 ok | 1 ok | ruby B:S T:F L:S C:S | yes | Hard Gate, independent of installed tools |
+| `php-no-tests` | 1 | 1 ok | 1 ok | php B:P T:F L:S C:S | yes | Hard Gate, independent of installed tools |
+| `swift-no-tests` | 1 | 1 ok | 1 ok | swift B:P T:F L:F C:S | yes | Hard Gate, independent of installed tools |
+| `cpp-no-tests` | 1 | 1 ok | 1 ok | cpp B:P T:F L:S C:S | yes | Hard Gate, independent of installed tools |
+| `elixir-no-tests` | 1 | 1 ok | 1 ok | elixir B:P T:F L:S C:S | yes | Hard Gate, independent of installed tools |
+| `java-maven` | 0 | 0 ok | 0 ok | java B:P T:P L:P C:P | yes | Maven + JUnit 5 + JaCoCo + Checkstyle: all four Gates really run |
+| `java-gradle` | 0 | 0 ok | 0 ok | java B:P T:P L:P C:P | yes | Gradle (no wrapper: system gradle) + JUnit 5 + JaCoCo + Checkstyle |
+| `kotlin-gradle-kts` | 0 | 0 ok | 0 ok | kotlin B:P T:P L:P C:P | yes | Kotlin via build.gradle.kts + kotlin.test + JaCoCo + ktlint |
+| `kotlin-gradle-groovy` | 0 | 0 ok | 0 ok | kotlin B:P T:P L:P C:P | yes | Kotlin via build.gradle (Groovy DSL) plus a .kt file, with JaCoCo and ktlint |
+| `scala-sbt` | 0 | 0 ok | 0 ok | scala B:P T:P L:P C:P | yes | sbt + ScalaTest + scalastyle + sbt-scoverage (statement coverage) |
+| `go-module` | 0 | 0 ok | 0 ok | go B:P T:P L:P C:P | yes | Go: -short tests, coverprofile, go vet / golangci-lint |
+| `go-test-fails` | 1 | 1 ok | 1 ok | go B:P T:F L:P C:S | yes | Go test failure |
+| `rust-cargo` | 0 | 0 ok | 0 ok | rust B:P T:P L:P C:P | yes | Rust with an in-file #[cfg(test)] module; coverage via cargo-llvm-cov |
+| `rust-integration-tests-dir` | 1 | 1 ok | 1 ok | rust B:P T:P L:P C:F | yes | Rust whose tests live only in tests/: cargo test --lib runs none, so coverage is 0% and FAILs (integration tests are out of scope by design) |
+| `dotnet-csproj` | 0 | 0 ok | 0 ok | dotnet B:P T:P L:P C:S | yes | .NET: one flat xUnit project (coverlet does not measure the test assembly, so coverage is SKIPPED) |
+| `dotnet-sln-only` | 0 | 0 ok | 0 ok | dotnet B:P T:P L:P C:P | yes | .NET: classic .sln at the root, library and xUnit test project in subdirectories |
+| `dotnet-global-json` | 1 | 1 ok | 1 ok | dotnet B:F T:F L:F C:S | yes | .NET: global.json alone is a signal but there is no project, so build fails |
+| `ruby-gem` | 0 | 0 ok | 0 ok | ruby B:P T:P L:P C:P | yes | Ruby: RSpec + SimpleCov + RuboCop + a Rakefile build task |
+| `ruby-no-rakefile-build` | 0 | 0 ok | 0 ok | ruby B:S T:P L:S C:P | yes | Ruby Minitest project without a Rakefile: build SKIPPED (no build command detected) |
+| `php-composer` | 0 | 0 ok | 0 ok | php B:P T:P L:P C:P | yes | PHP: PHPUnit 11 + PHPStan via composer; coverage needs pcov (installed here) |
+| `swift-package` | 0 | 0 ok | 0 ok | swift B:P T:P L:P C:P | yes | Swift Package: XCTest, SwiftLint, coverage from the SwiftPM JSON |
+| `cpp-cmake` | 0 | 0 ok | 0 ok | cpp B:P T:P L:P C:S | yes | C/C++ via CMakeLists.txt: cmake build, ctest, clang-tidy; coverage not implemented |
+| `cpp-makefile` | 0 | 0 ok | 0 ok | cpp B:P T:P L:P C:S | yes | C/C++ via Makefile plus a .c file, with a `test` target |
+| `elixir-mix` | 0 | 0 ok | 0 ok | elixir B:P T:P L:P C:P | yes | Elixir: ExUnit with mix test --cover, Credo |
+| `monorepo-mixed` | 0 | 0 ok | 0 ok | python B:S T:P L:P C:P / typescript B:P T:P L:P C:P / go B:P T:P L:P C:P | yes | three Projects in subdirectories (TypeScript, Python, Go); docs/ ignored |
 | `monorepo-one-fails` | 1 | 1 ok | 1 ok | python B:S T:F L:P C:P / typescript B:P T:P L:P C:P | yes | two Projects; a failure is attributed to its own Project only |
 | `root-and-sub` | 0 | 0 ok | 0 ok | typescript B:P T:P L:P C:P / python B:S T:P L:P C:P | yes | a root TypeScript Project and a Python Project in tools/ |
 | `no-signals` | 2 | 2 ok | 2 ok | (no report) | yes | nothing detected: script error |
 | `too-deep` | 2 | 2 ok | 2 ok | (no report) | yes | signal files two levels down are not scanned |
 | `cpp-makefile-without-sources-undetected` | 2 | 2 ok | 2 ok | (no report) | yes | a Makefile alone is not a C/C++ signal |
-| `symlinked-subdir` | 0 | 1 **!!** | 0 ok | typescript B:P T:F L:P C:S / typescript B:P T:P L:P C:P | **NO** | INTENDED: link-ts (a symlink) is skipped. KNOWN BUG: validate.sh scans it, so it exits 1 |
+| `symlinked-subdir` | 0 | 0 ok | 0 ok | typescript B:P T:P L:P C:P | yes | link-ts (a symlink) is skipped; only real-ts is a Project |
 | `hostile-subdir-name` | 0 | 0 ok | 2 **!!** | B:S T:P L:P C:P | **NO** | subdirectory name with quotes, backslash, & and $() |
-| `hostile-root-dir/we"ird 'dir' \ & $(x)` | 0 | 0 ok | 2 **!!** | python B:S T:P L:P C:P | **NO** | working directory name with quotes, backslash, & and $() |
+| `hostile-root-dir/we"ird 'dir' \ & $(x)` | 0 | 0 | 2 | python B:S T:P L:P C:P | **NO** |  |
 | `ambiguous-ts-over-python` | 0 | 0 ok | 0 ok | typescript B:P T:P L:P C:P | yes | package.json beats pyproject.toml (TypeScript wins) |
-| `ambiguous-java-over-go` | ? | 0  | 0  | java B:S T:S L:S C:S | yes | pom.xml beats go.mod (Java wins) |
-| `ambiguous-kotlin-over-java` | ? | 0  | 0  | kotlin B:S T:S L:S C:S | yes | build.gradle plus a .kt file is Kotlin, not Java |
+| `ambiguous-java-over-go` | 0 | 0 ok | 0 ok | java B:P T:P L:P C:P | yes | pom.xml beats go.mod (Java wins); a real Maven project |
+| `ambiguous-kotlin-over-java` | 0 | 0 ok | 0 ok | kotlin B:P T:P L:S C:P | yes | build.gradle plus a .kt file is Kotlin, not Java; Gradle project without ktlint or JaCoCo, so lint and coverage are SKIPPED |
 | `conf-comments-and-blank-lines` | 0 | 0 ok | 0 ok | typescript B:P T:P L:P C:P | yes | comments, blank lines and inline # comments in .validation.conf |
 | `conf-non-numeric-threshold` | 2 | 2 ok | 2 ok | (no report) | yes | COVERAGE_THRESHOLD=abc is a script error |
 | `conf-threshold-over-100` | 2 | 2 ok | 2 ok | (no report) | yes | COVERAGE_THRESHOLD=150 is a script error |
-| `conf-bad-language-key` | 2 | 2 ok | 0 **!!** | (no report) | **NO** | COVERAGE_THRESHOLD_TYPE-SCRIPT is an invalid key |
+| `conf-bad-language-key` | 2 | 2 ok | 2 ok | (no report) | yes | COVERAGE_THRESHOLD_TYPE-SCRIPT is an invalid key |
 | `conf-injection-attempt` | 2 | 2 ok | 2 ok | (no report) | yes | a shell command in a threshold value is rejected, not run |
+| `python-flask` | 0 | 0 ok | 0 ok | python B:S T:P L:P C:P | yes | Flask app tested with the test client under pytest |
+| `ts-vitest` | 0 | 0 ok | 0 ok | typescript B:P T:P L:S C:P | yes | Vitest (not Jest): own flags and coverage reporter |
+| `ts-vitest-test-fails` | 1 | 1 ok | 1 ok | typescript B:F T:F L:S C:S | yes | Vitest test failure |
+| `ts-vitest-low-coverage` | 1 | 1 ok | 1 ok | typescript B:F T:P L:S C:F | yes | Vitest coverage below the threshold |
+| `go-low-coverage` | 1 | 1 ok | 1 ok | go B:P T:P L:P C:F | yes | Go coverage below the threshold |
+| `rust-test-fails` | 1 | 1 ok | 1 ok | rust B:P T:F L:P C:S | yes | Rust test failure |
+| `rust-low-coverage` | 1 | 1 ok | 1 ok | rust B:P T:P L:P C:F | yes | Rust coverage below the threshold |
+| `rust-lint-fails` | 1 | 1 ok | 1 ok | rust B:P T:P L:F C:P | yes | clippy -D warnings failure |
+| `java-maven-test-fails` | 1 | 1 ok | 1 ok | java B:P T:F L:P C:S | yes | JUnit failure |
+| `java-maven-low-coverage` | 1 | 1 ok | 1 ok | java B:P T:P L:P C:F | yes | JaCoCo coverage below the threshold |
+| `java-maven-lint-fails` | 1 | 1 ok | 1 ok | java B:P T:P L:F C:P | yes | Checkstyle violation (unused import) |
+| `kotlin-test-fails` | 1 | 1 ok | 1 ok | kotlin B:P T:F L:P C:P | yes | kotlin.test failure |
+| `kotlin-lint-fails` | 1 | 1 ok | 1 ok | kotlin B:P T:P L:F C:P | yes | ktlint violation |
+| `scala-test-fails` | 1 | 1 ok | 1 ok | scala B:P T:F L:P C:S | yes | ScalaTest failure |
+| `scala-low-coverage` | 1 | 1 ok | 1 ok | scala B:P T:P L:P C:F | yes | scoverage below the threshold |
+| `ruby-test-fails` | 1 | 1 ok | 1 ok | ruby B:P T:F L:P C:P | yes | RSpec failure |
+| `ruby-lint-fails` | 1 | 1 ok | 1 ok | ruby B:P T:P L:F C:P | yes | RuboCop offences |
+| `ruby-low-coverage` | 1 | 1 ok | 1 ok | ruby B:P T:P L:P C:F | yes | SimpleCov below the threshold |
+| `ruby-minitest` | 0 | 0 ok | 0 ok | ruby B:S T:P L:S C:P | yes | Plain Minitest in test/, no RSpec |
+| `php-test-fails` | 1 | 1 ok | 1 ok | php B:P T:F L:P C:P | yes | PHPUnit failure |
+| `php-lint-fails` | 1 | 1 ok | 1 ok | php B:P T:P L:F C:P | yes | PHPStan error |
+| `php-low-coverage` | 1 | 1 ok | 1 ok | php B:P T:P L:P C:F | yes | pcov coverage below the threshold |
+| `elixir-test-fails` | 1 | 1 ok | 1 ok | elixir B:P T:F L:P C:F | yes | ExUnit failure |
+| `elixir-low-coverage` | 1 | 1 ok | 1 ok | elixir B:P T:P L:P C:F | yes | mix test --cover below the threshold |
+| `elixir-lint-fails` | 1 | 1 ok | 1 ok | elixir B:P T:P L:F C:F | yes | Credo issue (IO.inspect, missing moduledoc) |
+| `swift-test-fails` | 1 | 1 ok | 1 ok | swift B:P T:F L:P C:S | yes | XCTest failure |
+| `swift-low-coverage` | 1 | 1 ok | 1 ok | swift B:P T:P L:F C:F | yes | SwiftPM coverage below the threshold |
+| `cpp-makefile-test-fails` | 1 | 1 ok | 1 ok | cpp B:P T:F L:P C:S | yes | make test fails |
+| `cpp-cmake-test-fails` | 1 | 1 ok | 1 ok | cpp B:P T:F L:P C:S | yes | ctest fails |
+| `dotnet-xunit` | 0 | 0 ok | 0 ok | dotnet B:P T:P L:P C:P | yes | C# solution (.slnx) with a library and an xUnit project; coverlet Cobertura coverage |
+| `dotnet-nunit` | 0 | 0 ok | 0 ok | dotnet B:P T:P L:P C:P | yes | C# solution with an NUnit project |
+| `dotnet-aspnet` | 0 | 0 ok | 0 ok | dotnet B:P T:P L:P C:P | yes | ASP.NET Core minimal API tested through WebApplicationFactory |
+| `dotnet-xunit-test-fails` | 1 | 1 ok | 1 ok | dotnet B:P T:F L:P C:P | yes | xUnit failure |
+| `dotnet-xunit-low-coverage` | 1 | 1 ok | 1 ok | dotnet B:P T:P L:P C:F | yes | Cobertura coverage below the threshold |
+| `dotnet-xunit-lint-fails` | 1 | 1 ok | 1 ok | dotnet B:P T:P L:F C:P | yes | dotnet format --verify-no-changes reports formatting |
