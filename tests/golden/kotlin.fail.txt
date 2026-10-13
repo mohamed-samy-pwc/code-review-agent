@@ -1,7 +1,7 @@
 exit 1
 calls:
 gradlew assemble
-gradlew test
+gradlew test --rerun
 gradlew ktlintCheck
 gates:
 build FAIL exit=1 reason="gradlew assemble failed" log="validation-logs/root-kotlin-build.log" line_pct= threshold=

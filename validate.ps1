@@ -234,6 +234,8 @@ function Invoke-Gate { param([string]$Name, $P)
     $script:Gate.Proj = $projectDir; $script:Gate.Lang = $lang; $script:Gate.Name = $Name
     if ($Name -eq 'build') { $script:Gate.Reason = 'no build command applies' }
 
+    if ($Name -eq 'test') { Set-Content -Path (Join-Path $WorkDir "TESTSTART_${projectDir}_${lang}") -Value '' }
+
     if ($Name -eq 'coverage') {
         Set-GateCoverage $abs
     } elseif ($Name -eq 'test' -and -not (& "Recipe-$lang" 'has_tests' $abs)) {
@@ -371,18 +373,20 @@ function Test-GradleIncludes { param([string]$Dir)
     return $false
 }
 
-# Line coverage from a JaCoCo XML report (Java, Kotlin); nothing when absent.
+# Line coverage from a JaCoCo XML report written by this run; nothing when there is none.
+# The report-level LINE counter is the last one in the file, and the file may be a single line.
 function Get-JacocoLinePct { param([string]$Dir)
     $xml = "$Dir/target/site/jacoco/jacoco.xml"
     if (Test-Path "$Dir/build/reports/jacoco/test/jacocoTestReport.xml") { $xml = "$Dir/build/reports/jacoco/test/jacocoTestReport.xml" }
     if (-not (Test-Path $xml)) { return }
-    $line = Select-String -Path $xml -Pattern 'type="LINE"' | Select-Object -Last 1
-    if ($line -and $line.Line -match '.*missed="(\d+)"') {
-        $missed = [int]$Matches[1]
-        if ($line.Line -match '.*covered="(\d+)"') {
-            $total = $missed + [int]$Matches[1]
-            if ($total -gt 0) { return [Math]::Round([int]$Matches[1] / $total * 100, 1, [MidpointRounding]::AwayFromZero) }
-        }
+    # Ignore a report left on disk by an earlier run: it must be newer than the start of the test Gate.
+    $marker = Join-Path $WorkDir "TESTSTART_$($script:Gate.Proj)_$($script:Gate.Lang)"
+    if ((Test-Path $marker) -and ((Get-Item $xml).LastWriteTimeUtc -lt (Get-Item $marker).LastWriteTimeUtc)) { return }
+    $all = [regex]::Matches((Get-Content $xml -Raw), '<counter type="LINE" missed="(\d+)" covered="(\d+)"')
+    if ($all.Count -gt 0) {
+        $missed = [int]$all[$all.Count - 1].Groups[1].Value
+        $covered = [int]$all[$all.Count - 1].Groups[2].Value
+        if (($missed + $covered) -gt 0) { return [Math]::Round($covered / ($missed + $covered) * 100, 1, [MidpointRounding]::AwayFromZero) }
     }
 }
 
@@ -397,13 +401,14 @@ function Get-GradleLauncher { param([string]$Dir)
 function Invoke-JvmTest { param([string]$Dir)
     if (Test-Path "$Dir/mvnw")        { Invoke-GateRun 'test failed' $Dir "$Dir/mvnw" @('test') }
     elseif ((Test-Path "$Dir/pom.xml") -and (Find-Cmd 'mvn'))           { Invoke-GateRun 'test failed' $Dir 'mvn' @('test') }
-    elseif (Get-GradleLauncher $Dir)  { Invoke-GateRun 'test failed' $Dir (Get-GradleLauncher $Dir) @('test') }
+    elseif (Get-GradleLauncher $Dir)  { Invoke-GateRun 'test failed' $Dir (Get-GradleLauncher $Dir) @('test','--rerun') }
     else { Set-GateSkip 'toolchain not installed' }
 }
 
 function Recipe-java { param([string]$Req, [string]$Dir)
     switch ($Req) {
         'workspace_root' { return (((Test-Path "$Dir/pom.xml") -and ((Get-Content "$Dir/pom.xml" -Raw) -match '<modules>')) -or (Test-GradleIncludes $Dir)) }
+        'coverage_hint' { return 'configure the JaCoCo plugin to write an XML report' }
         'detect'    { return ((Test-Path "$Dir/pom.xml") -or (Test-Path "$Dir/build.gradle")) }
         'has_tests' { return (Test-Path "$Dir/src/test") }
         'build' {
@@ -426,6 +431,7 @@ function Recipe-java { param([string]$Req, [string]$Dir)
 function Recipe-kotlin { param([string]$Req, [string]$Dir)
     switch ($Req) {
         'workspace_root' { return (Test-GradleIncludes $Dir) }
+        'coverage_hint' { return 'configure the JaCoCo plugin to write an XML report' }
         'detect' {
             if (Test-Path "$Dir/build.gradle.kts") { return $true }
             return ((Test-Path "$Dir/build.gradle") -and [bool](Get-ChildItem -Path $Dir -Filter '*.kt' -ErrorAction SilentlyContinue))
@@ -666,7 +672,12 @@ function Recipe-swift { param([string]$Req, [string]$Dir)
             else { Set-GateSkip 'toolchain not installed (swift not found)' }
         }
         'lint' {
-            if (Find-Cmd 'swiftlint') { Invoke-GateRun 'swiftlint failed' $Dir 'swiftlint' @() }
+            if (Find-Cmd 'swiftlint') {
+                # SwiftPM keeps generated code in .build/, which is not the Project's to lint.
+                $paths = @()
+                if (Test-Path "$Dir/Package.swift") { $paths = @('Sources','Tests') | Where-Object { Test-Path "$Dir/$_" } }
+                Invoke-GateRun 'swiftlint failed' $Dir 'swiftlint' (@('lint') + $paths)
+            }
             else { Set-GateSkip 'linter not installed (swiftlint not found)' }
         }
         'coverage' {

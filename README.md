@@ -49,11 +49,188 @@ Only two flags exist: `--verbose` and `--dry-run`. Any other argument exits with
 
 - `NO_COLOR=1` turns off ANSI colour in the terminal output.
 
+## Understanding the tool
+
+This section is a map of the whole solution: what it is for, how the pieces fit, the vocabulary used in the code, what it covers, and how to use it. The vocabulary comes from `CONTEXT.md`.
+
+### The problem and the idea
+
+A code review agent spends compute (LLM tokens) on every review. That is wasted if the code does not even build or pass its own tests. The **Validation Script** is a cheap, deterministic first step: it runs the project's *own* tools, decides pass or fail, and stops the pipeline when the code is not fit to review. It is a **Hard Gate** (ADR-0001): any FAIL means a non-zero exit and no review.
+
+```mermaid
+flowchart LR
+    PR([Pull request or change]) --> V{{"Validation Script<br/>validate.sh / validate.ps1"}}
+    V -- "exit 0<br/>all Gates PASS or SKIPPED" --> CR[Code review agent runs]
+    V -- "exit 1<br/>a Gate FAILED" --> STOP1([Pipeline stops<br/>read validation-report.json])
+    V -- "exit 2<br/>script error" --> STOP2([Pipeline stops<br/>bad flag, bad config, no Project])
+    V -. writes .-> REP[("validation-report.json<br/>validation-logs/*.log")]
+    STOP1 -.-> REP
+```
+
+### Architecture
+
+Both scripts have the same structure, so a failure in one points straight at the matching code in the other. They share no code (ADR-0002 forbids runtime dependencies), and a parity test group guards that they agree.
+
+```mermaid
+flowchart TB
+    subgraph IN["Inputs"]
+        FLAGS["Flags<br/>--verbose, --dry-run"]
+        CONF[".validation.conf<br/>thresholds, VERBOSE"]
+        DIR["Invocation directory"]
+    end
+
+    subgraph SCRIPT["Validation Script (validate.sh and validate.ps1, same shape)"]
+        DET["Project detection<br/>root + immediate subdirectories<br/>asks each recipe: detect"]
+        subgraph PER["For each Project, in order: build, test, lint, coverage"]
+            RUN["Gate runner<br/>timing, status, Sidecar Log,<br/>dry-run, verbose, Hard Gate"]
+            REC["Language Recipe (1 of 13)<br/>has_tests, build, test, lint, coverage"]
+            RUN -- "calls" --> REC
+            REC -- "gate_run / gate_skip / gate_pass" --> RUN
+        end
+        GR[("Gate Results<br/>one record per Gate per Project")]
+        WRITER["Report writer<br/>pinned schema, JSON escaping"]
+        TABLE["Summary table"]
+        DET --> PER
+        RUN -- "writes once" --> GR
+        GR --> WRITER
+        GR --> TABLE
+    end
+
+    subgraph TOOLS["The Project's own toolchain (never installed by the script)"]
+        T1["npm, pytest, go, cargo, mvn, gradle,<br/>dotnet, bundle, composer, swift,<br/>cmake, mix, sbt, and linters"]
+    end
+
+    subgraph OUT["Outputs"]
+        JSON["validation-report.json"]
+        LOGS["validation-logs/*.log<br/>(only for failing Gates)"]
+        EXIT["Exit code 0, 1 or 2"]
+        TERM["Terminal status lines + table"]
+    end
+
+    FLAGS --> SCRIPT
+    CONF --> SCRIPT
+    DIR --> DET
+    REC -- "runs" --> T1
+    WRITER --> JSON
+    RUN --> LOGS
+    TABLE --> TERM
+    GR --> EXIT
+```
+
+What each part owns:
+
+| Part | Owns | Does not do |
+|---|---|---|
+| **Language Recipe** | Everything about one Language: signal files, test-file patterns, the command per Gate, when to skip and why, how to read coverage | Write files, time itself, print status lines |
+| **Gate runner** | Timing, PASS/FAIL/SKIPPED classification, Sidecar Logs, `--dry-run`, `--verbose`, and the rule "no test files is a FAIL" | Know any Language's commands |
+| **Gate Result** | One record per Gate per Project, written once | Get re-derived by the report or the table |
+| **Report writer** | The pinned `validation-report.json` schema, field order, nulls and escaping | Run anything |
+
+### What happens to one Gate
+
+```mermaid
+sequenceDiagram
+    participant R as Gate runner
+    participant L as Language Recipe
+    participant T as Project tool such as npm or cargo
+    participant S as Gate Result store
+
+    R->>R: print RUNNING, start timer
+    alt test Gate and recipe.has_tests is false
+        R->>R: FAIL "No test files detected" (Hard Gate), write Sidecar Log
+    else normal Gate
+        R->>L: build / test / lint
+        alt tool or config missing
+            L-->>R: gate_skip "reason"  (SKIPPED)
+        else tool present
+            L->>T: run command in the Project directory
+            T-->>L: exit code + output
+            L-->>R: exit 0 = PASS, otherwise FAIL "reason" (+ Sidecar Log)
+        end
+    end
+    R->>S: write status, reason, exit code, duration, log path
+    Note over R,S: The coverage Gate never re-runs tests. It parses the output the test Gate captured.
+```
+
+### Terminology
+
+```mermaid
+flowchart TD
+    VS["Validation Script<br/>validate.sh, validate.ps1, validate.bat"]
+    P["Project<br/>root or an immediate subdirectory<br/>where a Language was detected"]
+    LG["Language<br/>1 of 13 (JS and TS are one: typescript)"]
+    LR["Language Recipe<br/>everything known about one Language"]
+    QG["Quality Gate<br/>build, test, lint, coverage"]
+    GRs["Gate Result<br/>status, reason, exit code, duration,<br/>log path, coverage %, threshold"]
+    SL["Sidecar Log<br/>full output of one failing Gate"]
+    VR["Validation Report<br/>validation-report.json, schema pinned"]
+    HG["Hard Gate<br/>any FAIL stops the pipeline"]
+
+    VS -- "detects 1 or more" --> P
+    P -- "has exactly one" --> LG
+    LG -- "described by" --> LR
+    P -- "checked by 4" --> QG
+    QG -- "produces" --> GRs
+    GRs -- "a failing one also produces" --> SL
+    GRs -- "all of a run make up" --> VR
+    VR -- "FAIL present means" --> HG
+```
+
+| Term | Meaning in one line |
+|---|---|
+| **PASS / FAIL / SKIPPED** | A Gate's status. FAIL stops the pipeline. SKIPPED means "not applicable or tool not installed" and does **not** stop it. |
+| **Threshold** | Minimum line coverage, default 80%, set globally or per Language in `.validation.conf`. |
+| **Signal file** | A file whose presence identifies a Language, such as `go.mod` or `pom.xml`. |
+| **Unit-test scoping** | Only unit tests run (for example `go test -short`, `cargo test --lib`, `pytest -m unit`). |
+
+### Does it cover everything?
+
+It covers the common path for 13 Languages. It deliberately does **not** try to be a full CI system.
+
+| Area | Covered | Not covered |
+|---|---|---|
+| **Languages** | TypeScript/JavaScript, Python, Java, Kotlin, Go, Rust, .NET, Ruby, PHP, Swift, C/C++, Elixir, Scala | Any other Language is "not a Project" (exit 2 if nothing is detected) |
+| **Gates** | Build, unit tests, lint, line coverage | Integration and end-to-end tests, security scanning, dependency audits, type checks beyond the build |
+| **Coverage numbers** | Read for TypeScript/JavaScript (Jest, Vitest), Python (pytest-cov), Go, Rust (`cargo-llvm-cov` or `cargo-tarpaulin`), Java and Kotlin (JaCoCo), .NET (coverlet Cobertura), Ruby (SimpleCov), PHP (needs pcov or Xdebug), Swift (SwiftPM), Elixir (`mix test --cover`), Scala (sbt-scoverage, which measures statements) | C/C++ runs its tests but reports coverage as SKIPPED. Branch and function coverage are always `null`. A coverage tool the Project does not have gives SKIPPED with a hint, never a FAIL. |
+| **Layout** | The invocation directory and its immediate subdirectories (monorepo packages), each gated separately | Anything nested deeper than one level |
+| **Test frameworks** | Jest, Vitest, pytest, JUnit (Maven and Gradle), xUnit, NUnit and MSTest (`dotnet test`), RSpec, Minitest and Rails, PHPUnit, ExUnit, ScalaTest (sbt), XCTest (SwiftPM), CTest and `make test`, `go test`, `cargo test` | Mocha, Ava and Tap are not recognised (the TypeScript recipe passes Jest or Vitest flags) |
+| **Tools** | Uses what the Project already has | It never installs anything, so a missing tool means SKIPPED, not FAIL. A linter that is not configured in the Project (RuboCop, Credo, ktlint, scalastyle, `.clang-tidy`, clippy) is also SKIPPED |
+| **Platforms** | macOS and Linux (`validate.sh`), PowerShell 7 (`validate.ps1`) | Windows PowerShell 5.1 and `validate.bat` have not been exercised |
+
+The consequence to remember: **SKIPPED is not a pass of the underlying check.** A machine without Go will report a Go Project as SKIPPED and exit 0, except that "no test files" is always a FAIL. Run the script on a machine that has the Project's toolchain.
+
+### How it is used
+
+```mermaid
+flowchart TD
+    A["cd into the Project or repo root"] --> B{"Optional:<br/>create .validation.conf"}
+    B --> C["Run validate.sh or validate.ps1"]
+    C --> D{"Exit code"}
+    D -- "0" --> E["Proceed to code review"]
+    D -- "1" --> F["Open validation-report.json<br/>and validation-logs/ for the failing Gate"]
+    D -- "2" --> G["Fix the invocation:<br/>bad flag, bad threshold, no Project found"]
+    F --> H["Fix the Project, run again"]
+    H --> C
+```
+
+Typical commands:
+
+```sh
+cd /path/to/project && /path/to/validate.sh              # normal run
+/path/to/validate.sh --dry-run                           # show the commands, run nothing
+/path/to/validate.sh --verbose                           # stream full tool output
+printf 'COVERAGE_THRESHOLD_GO=70\n' > .validation.conf    # per-Language threshold
+```
+
+To add a Language, see "Script structure" below.
+
 ## How it works
 
 ### 1. Project detection
 
 The script scans the invocation directory and each **immediate subdirectory** (depth 1, symlinks not followed). A directory that contains language signal files is treated as an independent project. Root and sub-directory signals are never merged, so a monorepo's `frontend/` and `backend/` are gated separately. If no signals are found, the script exits with code 2.
+
+A **workspace root** owns its subprojects. If the root has a solution file (`*.sln`, `*.slnx`), a Maven `<modules>` list, a Gradle `include`, a Cargo `[workspace]` or a `go.work`, then same-family subdirectories are part of that build and are **not** separate Projects. Without this a standard C# layout (solution at the root, `src/App` and `tests/App.Tests` below it) would be gated three times, and the library project, which has no tests, would fail the Hard Gate.
 
 Detection uses file presence only:
 
@@ -65,7 +242,7 @@ Detection uses file presence only:
 | Kotlin | `build.gradle.kts`, or `build.gradle` with `.kt` files |
 | Go | `go.mod` |
 | Rust | `Cargo.toml` |
-| .NET | `*.csproj`, `*.sln`, `global.json` |
+| .NET (C#) | `*.csproj`, `*.sln`, `*.slnx`, `global.json` |
 | Ruby | `Gemfile` |
 | PHP | `composer.json` |
 | Swift | `Package.swift`, `*.xcodeproj` |

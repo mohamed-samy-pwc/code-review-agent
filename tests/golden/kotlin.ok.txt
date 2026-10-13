@@ -1,7 +1,7 @@
 exit 0
 calls:
 gradlew assemble
-gradlew test
+gradlew test --rerun
 gradlew ktlintCheck
 gates:
 build PASS exit=0 reason=null log=null line_pct= threshold=

@@ -2,7 +2,7 @@ exit 1
 calls:
 swift build
 swift test --enable-code-coverage
-swiftlint 
+swiftlint lint
 gates:
 build FAIL exit=1 reason="swift build failed" log="validation-logs/root-swift-build.log" line_pct= threshold=
 test FAIL exit=1 reason="swift test failed" log="validation-logs/root-swift-test.log" line_pct= threshold=

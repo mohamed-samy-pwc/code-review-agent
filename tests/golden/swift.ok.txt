@@ -3,7 +3,7 @@ calls:
 swift build
 swift test --enable-code-coverage
 swift test --show-codecov-path
-swiftlint 
+swiftlint lint
 gates:
 build PASS exit=0 reason=null log=null line_pct= threshold=
 test PASS exit=0 reason=null log=null line_pct= threshold=

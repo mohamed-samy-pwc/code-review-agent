@@ -356,7 +356,13 @@ _recipe_swift() {
       fi ;;
     lint)
       if command -v swiftlint >/dev/null 2>&1; then
-        gate_run "swiftlint failed" "$_d" swiftlint
+        # SwiftPM keeps generated code in .build/, which is not the Project's to lint.
+        _sp=''
+        if [ -f "$_d/Package.swift" ]; then
+          for _dir in Sources Tests; do [ -d "$_d/$_dir" ] && _sp="$_sp $_dir"; done
+        fi
+        # shellcheck disable=SC2086
+        gate_run "swiftlint failed" "$_d" swiftlint lint $_sp
       else
         gate_skip "linter not installed (swiftlint not found)"
       fi ;;
@@ -438,15 +444,19 @@ _gradle() { # <dir>
   else return 1; fi
 }
 
-# Line coverage from a JaCoCo XML report; prints "null" when there is none.
-_jacoco_line_pct() {
+# Line coverage from a JaCoCo XML report written by this run; prints nothing when there is none.
+# The report-level LINE counter is the last one in the file, and the file may be a single line.
+_jacoco_line_pct() { # <dir>
   _jxml="$1/target/site/jacoco/jacoco.xml"
   [ -f "$1/build/reports/jacoco/test/jacocoTestReport.xml" ] && \
     _jxml="$1/build/reports/jacoco/test/jacocoTestReport.xml"
-  _jp=null
-  if [ -f "$_jxml" ]; then
-    _missed=$(grep 'type="LINE"' "$_jxml" | tail -1 | sed 's/.*missed="\([0-9]*\)".*/\1/')
-    _cov=$(grep 'type="LINE"' "$_jxml" | tail -1 | sed 's/.*covered="\([0-9]*\)".*/\1/')
+  _jp=''
+  # Ignore a report left on disk by an earlier run: it must be newer than the start of the test Gate.
+  # (Not "older than the marker": file times can be whole seconds, and a fast run ties with the marker.)
+  if [ -f "$_jxml" ] && ! find "$WORK/TESTSTART_${_project_index}" -newer "$_jxml" 2>/dev/null | grep -q .; then
+    _counter=$(grep -o '<counter type="LINE" missed="[0-9]*" covered="[0-9]*"' "$_jxml" | tail -1)
+    _missed=$(printf '%s' "$_counter" | sed -n 's/.*missed="\([0-9]*\)".*/\1/p')
+    _cov=$(printf '%s' "$_counter" | sed -n 's/.*covered="\([0-9]*\)".*/\1/p')
     [ -n "$_missed" ] && [ -n "$_cov" ] && _tot=$((_missed + _cov)) && [ "$_tot" -gt 0 ] && \
       _jp=$(awk "BEGIN{printf \"%.1f\",($_cov/$_tot)*100}")
   fi
@@ -457,6 +467,7 @@ _recipe_java() {
   _req="$1"; _d="$2"
   case "$_req" in
     workspace_root) grep -q '<modules>' "$_d/pom.xml" 2>/dev/null || grep -qs '^[[:space:]]*include' "$_d/settings.gradle" "$_d/settings.gradle.kts" ;;
+    coverage_hint) printf 'configure the JaCoCo plugin to write an XML report' ;;
     detect)
       { [ -f "$_d/pom.xml" ] || [ -f "$_d/build.gradle" ]; } ;;
     has_tests) [ -d "$_d/src/test" ] ;;
@@ -489,6 +500,7 @@ _recipe_kotlin() {
   _req="$1"; _d="$2"
   case "$_req" in
     workspace_root) grep -qs '^[[:space:]]*include' "$_d/settings.gradle" "$_d/settings.gradle.kts" ;;
+    coverage_hint) printf 'configure the JaCoCo plugin to write an XML report' ;;
     detect)
       [ -f "$_d/build.gradle.kts" ] || \
         { [ -f "$_d/build.gradle" ] && ls "$_d"/*.kt >/dev/null 2>&1; } ;;
@@ -514,7 +526,9 @@ _recipe_kotlin() {
 _jvm_test() {
   if [ -f "$1/mvnw" ]; then gate_run "test failed" "$1" ./mvnw test
   elif [ -f "$1/pom.xml" ] && command -v mvn >/dev/null 2>&1; then gate_run "test failed" "$1" mvn test
-  elif _g=$(_gradle "$1"); then gate_run "test failed" "$1" "$_g" test
+  elif _g=$(_gradle "$1"); then
+    # --rerun forces the tests (and so the JaCoCo report) to run instead of being UP-TO-DATE or FROM-CACHE.
+    gate_run "test failed" "$1" "$_g" test --rerun
   else gate_skip "toolchain not installed"; fi
 }
 
@@ -798,6 +812,7 @@ _gate_coverage() {
     GATE_LPCT=''
     gate_skip "coverage parsing not implemented for $GATE_LANG"; GATE_DETAIL="$GATE_REASON"; return
   fi
+  [ -n "$GATE_LPCT" ] && GATE_LPCT=$(awk -v n="$GATE_LPCT" 'BEGIN { printf "%s", n + 0 }')   # 85.00 -> 85, like validate.ps1
   if [ -z "$GATE_LPCT" ]; then
     _hint=$("_recipe_$GATE_LANG" coverage_hint "$_abs" 2>/dev/null)
     gate_skip "coverage output unparseable${_hint:+ ($_hint)}"
@@ -821,6 +836,7 @@ _run_gate() {
   _t0=$(date +%s)
   _status_line "$_project" "$_lang" "$_gate" "RUNNING"
 
+  [ "$_gate" = "test" ] && : > "$WORK/TESTSTART_${_project_index}"
   if [ "$_gate" = "coverage" ]; then
     _gate_coverage
   elif [ "$_gate" = "test" ] && ! "_recipe_$_lang" has_tests "$_abs"; then

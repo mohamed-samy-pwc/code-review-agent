@@ -29,13 +29,15 @@ GOLDEN_DIR="$REPO_ROOT/tests/golden"
 
 # Utilities validate.sh itself needs; linked into an otherwise empty bin dir so
 # that no real build tool (python3, make, swift, ...) can be found by accident.
-_CHAR_SYSTOOLS="sh grep sed awk find date mktemp cat cp rm mkdir tr head tail basename dirname ls tee wc cut sort uname expr env test true false"
+_CHAR_SYSTOOLS="sh grep sed awk find date mktemp cat cp rm mkdir tr head tail basename dirname ls tee wc cut sort uname expr env test true false touch"
 
 _char_make_stub() { # <path>   (the stub's file name is the tool name it impersonates)
   cat > "$1" <<'STUB'
 #!/bin/sh
 _n=$(basename "$0")
 printf '%s %s\n' "$_n" "$*" >> "$STUB_LOG"
+# A real build writes its coverage report during the run; refresh the fixture's report the same way.
+[ -n "${STUB_TOUCH:-}" ] && [ -f "$STUB_TOUCH" ] && touch "$STUB_TOUCH"
 [ -f "$STUB_DIR/$_n.out" ] && cat "$STUB_DIR/$_n.out"
 if [ -f "$STUB_DIR/$_n.exit" ]; then exit "$(cat "$STUB_DIR/$_n.exit")"; fi
 exit 0
@@ -129,7 +131,13 @@ _char_observe() { # <lang> <scenario> <script command...>
   _fix="$_root/project"; _stubs="$_root/bin"; _sdir="$_root/stubdata"
   rm -rf "$_root"; mkdir -p "$_stubs" "$_sdir"
   STUB_LOG="$_root/calls.log"; : > "$STUB_LOG"
-  STUB_DIR="$_sdir"; export STUB_LOG STUB_DIR
+  STUB_DIR="$_sdir"
+  case "$_l" in
+    java)   STUB_TOUCH="$_fix/target/site/jacoco/jacoco.xml" ;;
+    kotlin) STUB_TOUCH="$_fix/build/reports/jacoco/test/jacocoTestReport.xml" ;;
+    *)      STUB_TOUCH="" ;;
+  esac
+  export STUB_LOG STUB_DIR STUB_TOUCH
 
   case "$_s" in
     missing) _char_make_project "$_l" "$_fix" no ;;
