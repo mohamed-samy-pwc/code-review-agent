@@ -1,19 +1,19 @@
 # Dummy-project validation report
 
 **Date:** 2026-10-13. **Scripts:** `validate.sh` and `validate.ps1` at commit `4556c1e` (PowerShell 7.6.6, macOS arm64).
-**Scope:** every one of the 101 projects in `~/AI-projects/pwc/dummy-projects/` was run with **both** scripts, against **real toolchains** (see "Toolchains used"). Exit code, per-Gate status and reason, coverage and the Sidecar Log file names were compared between the scripts and against the expected exit code in `cases.tsv`.
+**Scope:** every one of the 103 projects in `~/AI-projects/pwc/dummy-projects/` was run with **both** scripts, against **real toolchains** (see "Toolchains used"). Exit code, per-Gate status and reason, coverage and the Sidecar Log file names were compared between the scripts and against the expected exit code in `cases.tsv`.
 
 ## Verdict
 
 | Check | Result |
 |---|---|
-| Projects run | 101 |
-| `validate.sh` gives the expected exit code | 100 / 100 |
-| `validate.ps1` gives the expected exit code | 99 / 100 |
-| Both scripts identical (exit code, every Gate status and reason, Sidecar Logs) | 99 / 101 |
+| Projects run | 103 |
+| `validate.sh` gives the expected exit code | 102 / 102 |
+| `validate.ps1` gives the expected exit code | 101 / 102 |
+| Both scripts identical (exit code, every Gate status and reason, Sidecar Logs) | 101 / 103 |
 | Test harness (`tests/run.sh`, fake toolchains plus fixtures plus parity) | 134 passed, 0 failed |
 
-The 2 cases that differ are the same single limit: PowerShell 7 on macOS starts in the wrong directory when the current directory's name contains a backslash (`hostile-subdir-name`, `hostile-root-dir/…`). `validate.sh` handles those names; `validate.ps1` exits 2 (a safe failure) because `pwsh` itself cannot see the project. It is a runtime limit, not a script bug.
+The 2 cases that differ are the same single limit: PowerShell 7 on macOS starts in the wrong directory when the current directory's name contains a backslash (`hostile-subdir-name`, `hostile-root-dir/…`). `validate.sh` handles those names; `validate.ps1` exits 2 (a safe failure) because `pwsh` itself cannot see the project. It is a runtime limit, not a script bug: on Unix, PowerShell's own file cmdlets (`Test-Path`, `Get-ChildItem`) cannot address a directory whose name contains `\`, even with `-LiteralPath`, while .NET APIs can. Working around it would mean rewriting every file access in `validate.ps1`, which I did not do.
 
 ## Correction to the first version of this report
 
@@ -34,7 +34,7 @@ The fake-toolchain tests only prove that the scripts issue the commands the scri
 
 **Test discovery and runners**
 - C# test projects whose files are not named `*Test(s).cs` (the xUnit template creates `UnitTest1.cs`) failed the Hard Gate. They are now recognised by `[Fact]`, `[Test]`, `[TestMethod]` attributes.
-- Vitest projects always FAILed: the TypeScript recipe passed Jest-only flags.
+- Vitest, Mocha, Ava and Tap projects always FAILed: the TypeScript recipe passed Jest-only flags to every runner.
 - Ruby Minitest and Rails projects always FAILed (RSpec was assumed). Ruby `rspec --tag unit` with no tagged examples ran nothing and passed.
 - sbt `testOnly *Unit*` with no match ran nothing and exited 0, giving 0% coverage and a false FAIL.
 - A Gradle project FAILed on any machine that had Maven installed (`mvn` was run without a `pom.xml`), and Gradle projects without a wrapper were skipped even when `gradle` was installed.
@@ -62,7 +62,7 @@ The fake-toolchain tests only prove that the scripts issue the commands the scri
 - **Scala coverage** is statement coverage (what sbt-scoverage measures), not line coverage.
 - **PHP** coverage needs `pcov` or Xdebug; without one the Gate is SKIPPED with an install hint. Here `pcov` was built locally.
 - **.NET** flat projects (code and tests in one project) report no coverage, because coverlet does not measure the test assembly. Use a library plus a test project.
-- **Mocha, Ava and Tap** test runners are not recognised (Jest and Vitest are).
+- **Mocha, Ava, Tap and node:test** run through plain `npm test`; coverage is read only if the script prints a table (c8, nyc). Jest and Vitest get their own flags.
 - **Integration tests** are out of scope by design, so a Rust crate with tests only in `tests/` has 0% unit coverage and fails (`rust-integration-tests-dir`).
 - **Platforms:** `validate.ps1` was only run under PowerShell 7 on macOS. Windows PowerShell 5.1, Linux and `validate.bat` were not exercised.
 - Dummy projects need network access for their own dependencies (Maven Central, NuGet, npm, PyPI, RubyGems, crates.io, Hex, Packagist), because they are real projects. The scripts themselves still use no network.
@@ -134,6 +134,8 @@ Gates: `B` build, `T` test, `L` lint, `C` coverage, each `P` (PASS), `F` (FAIL) 
 | `ambiguous-ts-over-python` | 0 | 0 ok | 0 ok | typescript B:P T:P L:P C:P | yes | package.json beats pyproject.toml (TypeScript wins) |
 | `ambiguous-java-over-go` | 0 | 0 ok | 0 ok | java B:P T:P L:P C:P | yes | pom.xml beats go.mod (Java wins); a real Maven project |
 | `ambiguous-kotlin-over-java` | 0 | 0 ok | 0 ok | kotlin B:P T:P L:S C:P | yes | build.gradle plus a .kt file is Kotlin, not Java; Gradle project without ktlint or JaCoCo, so lint and coverage are SKIPPED |
+| `ts-mocha` | 0 | 0 ok | 0 ok | typescript B:S T:P L:S C:P | yes | Mocha with c8 (not Jest or Vitest): plain npm test, coverage from the c8 table |
+| `ts-mocha-test-fails` | 1 | 1 ok | 1 ok | typescript B:S T:F L:S C:P | yes | Mocha test failure |
 | `conf-comments-and-blank-lines` | 0 | 0 ok | 0 ok | typescript B:P T:P L:P C:P | yes | comments, blank lines and inline # comments in .validation.conf |
 | `conf-non-numeric-threshold` | 2 | 2 ok | 2 ok | (no report) | yes | COVERAGE_THRESHOLD=abc is a script error |
 | `conf-threshold-over-100` | 2 | 2 ok | 2 ok | (no report) | yes | COVERAGE_THRESHOLD=150 is a script error |

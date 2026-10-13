@@ -85,7 +85,7 @@ _char_make_project() { # <lang> <dir> <local yes|no>
   mkdir -p "$_d"
   case "$_l" in
     typescript)
-      printf '{"name":"t","scripts":{"build":"true","test":"true"}}\n' > "$_d/package.json"
+      printf '{"name":"t","scripts":{"build":"true","test":"jest"}}\n' > "$_d/package.json"
       : > "$_d/a.test.ts"; : > "$_d/eslint.config.js"
       if [ "$_loc" = yes ]; then mkdir -p "$_d/node_modules/.bin"; _char_make_stub "$_d/node_modules/.bin/eslint"; fi ;;
     python) : > "$_d/pyproject.toml"; : > "$_d/test_a.py" ;;

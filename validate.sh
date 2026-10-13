@@ -157,6 +157,10 @@ _recipe_typescript() {
         if grep -q '"vitest"' "$_d/package.json" 2>/dev/null; then
           # Vitest has none of Jest's flags; run the whole suite with its text reporter.
           gate_run "npm test failed (exit {exit})" "$_d" npm test -- --coverage --coverage.reporter=text
+        elif ! grep -qE '"(jest|react-scripts)"|jest' "$_d/package.json" 2>/dev/null; then
+          # Another runner (Mocha, Ava, Tap, node:test...): its own `npm test`, no Jest flags.
+          # Coverage is read only if the script prints a coverage table (c8, nyc).
+          gate_run "npm test failed (exit {exit})" "$_d" npm test
         else
           # Jest: run with unit pattern; if no tests match, retry without pattern
           gate_exec "$_d" npm test -- --coverage --coverageReporters=text \

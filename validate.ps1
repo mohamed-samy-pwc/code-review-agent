@@ -283,6 +283,10 @@ function Recipe-typescript { param([string]$Req, [string]$Dir)
             if ((Test-Path "$Dir/package.json") -and ((Get-Content "$Dir/package.json" -Raw) -match '"vitest"')) {
                 # Vitest has none of Jest's flags; run the whole suite with its text reporter.
                 Invoke-GateRun 'npm test failed (exit {exit})' $Dir 'npm' @('test','--','--coverage','--coverage.reporter=text')
+            } elseif (-not ((Test-Path "$Dir/package.json") -and ((Get-Content "$Dir/package.json" -Raw) -match 'jest|react-scripts'))) {
+                # Another runner (Mocha, Ava, Tap, node:test...): its own `npm test`, no Jest flags.
+                # Coverage is read only if the script prints a coverage table (c8, nyc).
+                Invoke-GateRun 'npm test failed (exit {exit})' $Dir 'npm' @('test')
             } else {
                 # Jest: run with unit pattern; if no tests match, retry without pattern
                 Invoke-GateExec $Dir 'npm' @('test','--','--coverage','--coverageReporters=text','--testPathPattern=(unit|spec)','--forceExit')
